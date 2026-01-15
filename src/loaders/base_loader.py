@@ -71,3 +71,9 @@ class BaseDataLoader(abc.ABC):
         """简单的 Batch 生成器"""
         for i in range(0, len(self.samples), batch_size):
             yield self.samples[i : i + batch_size]
+            
+    def retrieve(self, query: str) -> List[PageElement]:
+        """
+        根据查询检索页面元素。
+        """
+        raise NotImplementedError
