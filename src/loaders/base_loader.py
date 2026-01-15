@@ -14,8 +14,8 @@ class PageElement:
     # 强烈建议使用归一化坐标 (0 - 1000)，以适应不同分辨率的图像
     bbox: List[int] = field(default_factory=list) 
     type: str = "text"          # 'text', 'table', 'image', 'chart' 等，可以是None
-    content: str                # 文本内容 (如果是纯图，可以是OCR结果或图像描述)
-    corpus_id: str # 元素所属页面ID
+    content: str = ""                # 文本内容 (如果是纯图，可以是OCR结果或图像描述)
+    corpus_id: str = "" # 元素所属页面ID
     
     # 预留字段，用于存储该元素对应的原始图像裁剪路径，用于视觉模型输入
     crop_path: Optional[str] = None 
