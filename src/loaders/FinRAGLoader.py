@@ -4,8 +4,12 @@ import sys
 import torch
 import numpy as np
 import faiss
+import asyncio
+import re
 from tqdm import tqdm
 from typing import List, Dict, Any, Optional
+from PIL import Image  # 需要安装 pillow: pip install pillow
+import uuid
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -13,23 +17,24 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from scripts.qwen3_vl_embedding import Qwen3VLEmbedder
 from scripts.qwen3_vl_reranker import Qwen3VLReranker
+from src.agents.ElementExtractor import ElementExtractor
 
 class FinRAGLoader(BaseDataLoader):
-    def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None):
+    def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
         super().__init__(data_root)
         self.lang = lang.lower()
         self.embedding_model = embedding_model
         self.rerank_model = rerank_model
+        self.extractor = extractor
         
         # --- 路径配置 ---
         self.query_path = os.path.join(data_root, "data", "queries", f"queries_{self.lang}.json")
         self.corpus_root = os.path.join(data_root, "data", "corpus", self.lang)
         self.qrels_path = os.path.join(data_root, "data", "qrels", f"qrels_{self.lang}.tsv")
         
-        # 索引路径 (建议修改文件名以区分 HNSW 和 Flat 索引)
+        # 索引路径
         cache_dir = os.path.join(data_root, "data", "indices")
         os.makedirs(cache_dir, exist_ok=True)
-        # 修改索引后缀或名称，避免加载旧的 Flat 索引报错
         self.index_path = os.path.join(cache_dir, f"finrag_{self.lang}_hnsw.index")
         self.doc_map_path = os.path.join(cache_dir, f"finrag_{self.lang}_hnsw_docmap.json")
         
@@ -132,34 +137,22 @@ class FinRAGLoader(BaseDataLoader):
         if not image_paths:
             raise FileNotFoundError(f"No images found in {self.corpus_root}")
 
-        # Get dimension from a sample
         sample_emb = self._embed_images([image_paths[0]]) 
         d = sample_emb.shape[1]
         
-        # --- HNSW 配置 ---
-        # M: 每个节点的邻居连接数，通常在 16~64 之间，越大精度越高但构建越慢/内存占用越大
         M = 32 
-        # 使用 Inner Product (内积) 度量，配合 L2 归一化等价于余弦相似度
         index = faiss.IndexHNSWFlat(d, M, faiss.METRIC_INNER_PRODUCT)
-        
-        # efConstruction: 构建时的搜索深度，建议设为 M 的 2 倍以上，影响构建时间和索引质量
         index.hnsw.efConstruction = 64 
-        
-        # 注意: verbose 设为 True 可以看到构建进度
         index.verbose = True 
 
         doc_id_counter = 0
         batch_paths = []
-        
-        # Faiss HNSW 不支持像 IVF 那样的 train 过程，但它是增量构建的
-        # 只需要 add 即可
         
         for path in tqdm(image_paths, desc="Indexing Pages (HNSW)"):
             batch_paths.append(path)
             
             if len(batch_paths) >= batch_size:
                 embeddings = self._embed_images(batch_paths)
-                # 依然需要归一化，因为使用的是 Inner Product 模拟 Cosine Similarity
                 faiss.normalize_L2(embeddings) 
                 index.add(embeddings)
                 
@@ -194,19 +187,14 @@ class FinRAGLoader(BaseDataLoader):
         if self.index is None:
             raise RuntimeError("Index not built. Call build_page_vector_pool() first.")
 
-        # 设置 HNSW 检索时的 efSearch 参数
-        # efSearch 越大，召回率越高，但速度越慢。通常 efSearch > top_k
         if hasattr(self.index, 'hnsw'):
              self.index.hnsw.efSearch = max(ef_search, top_k * 2)
 
-        # 1. Encode Query
         query_vec = self._embed_text(query)
         faiss.normalize_L2(query_vec)
         
-        # 2. Faiss Search
         scores, indices = self.index.search(query_vec, top_k)
         
-        # 3. Encapsulate as PageElement
         retrieved_pages = []
         for score, idx in zip(scores[0], indices[0]):
             if idx == -1: continue
@@ -251,47 +239,300 @@ class FinRAGLoader(BaseDataLoader):
         sorted_pages = sorted(pages, key=lambda x: x.retrieval_score, reverse=True)
         return sorted_pages
 
+    # def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
+    #     """
+    #     Step 3: Downstream Element Extraction using ElementExtractor.
+    #     Uses the ElementExtractor agent to find specific evidence on the retrieved pages.
+    #     """
+    #     if self.extractor is None:
+    #         print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
+    #         # 如果没有 extractor，可以返回原页面作为结果，或者返回空
+    #         return pages 
+
+    #     fine_grained_elements = []
+        
+    #     # 遍历检索并重排后的所有页面
+    #     for page in tqdm(pages, desc="Extracting Elements"):
+    #         image_path = page.crop_path
+            
+    #         # 安全检查
+    #         if not image_path or not os.path.exists(image_path):
+    #             print(f"Warning: Image path not found: {image_path}")
+    #             continue
+
+    #         try:
+    #             # 处理异步调用。如果当前已经在 loop 中（例如 Notebook 环境），直接调用可能会报错
+    #             # 这里使用简单的 asyncio.run，假设是在独立脚本中运行
+    #             try:
+    #                 loop = asyncio.get_running_loop()
+    #             except RuntimeError:
+    #                 loop = None
+                
+    #             if loop and loop.is_running():
+    #                 print("Warning: Async event loop is already running. Cannot use asyncio.run(). Skipping this page.")
+    #                 continue
+    #             else:
+    #                 agent_output = asyncio.run(self.extractor.run_agent(
+    #                     user_text=query,
+    #                     image_paths=[image_path]
+    #                 ))
+                
+    #             if not agent_output:
+    #                 continue
+
+    #             # --- 解析 Agent 输出 ---
+    #             predictions = agent_output.get("predictions", [])
+    #             if not predictions:
+    #                 continue
+                
+    #             # 获取最后一条回复内容
+    #             last_msg_content = predictions[-1].get("content", "")
+                
+    #             # 提取 JSON 块
+    #             json_str = "[]"
+    #             match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+    #             if match:
+    #                 json_str = match.group(1).strip()
+    #             else:
+    #                 # 尝试查找最外层列表
+    #                 start = last_msg_content.find('[')
+    #                 end = last_msg_content.rfind(']')
+    #                 if start != -1 and end != -1:
+    #                     json_str = last_msg_content[start:end+1]
+
+    #             try:
+    #                 extracted_data = json.loads(json_str)
+    #             except json.JSONDecodeError:
+    #                 print(f"JSON Decode Error for page {page.corpus_id}")
+    #                 extracted_data = []
+
+    #             # 转换为 PageElement
+    #             if isinstance(extracted_data, list):
+    #                 for item in extracted_data:
+    #                     bbox = item.get("bbox", [0, 0, 0, 0])
+    #                     evidence = item.get("evidence", "")
+                        
+    #                     # 构造新的精细化元素
+    #                     element = PageElement(
+    #                         bbox=bbox,
+    #                         type="evidence",
+    #                         content=evidence,
+    #                         corpus_id=page.corpus_id,
+    #                         crop_path=image_path # 保留原图路径引用
+    #                     )
+    #                     # 继承页面的检索分数 (可选)
+    #                     if hasattr(page, 'retrieval_score'):
+    #                         element.retrieval_score = page.retrieval_score
+                            
+    #                     fine_grained_elements.append(element)
+                        
+    #         except Exception as e:
+    #             print(f"Error during extraction on {page.corpus_id}: {e}")
+
+    #     # 如果没有提取到任何精细化元素，可以考虑降级返回原页面，或者就返回空列表
+    #     if not fine_grained_elements:
+    #         print("No fine-grained elements extracted, returning empty list.")
+            
+    #     return fine_grained_elements
+
     def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
-        """Step 3: Downstream Element Extraction (Mocked)"""
+        """
+        Step 3: Downstream Element Extraction using ElementExtractor.
+        Uses the ElementExtractor agent to find specific evidence on the retrieved pages.
+        """
+        if self.extractor is None:
+            print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
+            return pages 
+
+        # 定义裁剪图片保存的本地工作目录
+        workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
+        os.makedirs(workspace_dir, exist_ok=True)
+
         fine_grained_elements = []
-        for page in pages:
-            e1 = PageElement(
-                bbox=[100, 100, 900, 200],
-                type="text",
-                content=f"Extracted text from {page.corpus_id}",
-                corpus_id=page.corpus_id,
-                crop_path=page.crop_path 
-            )
-            fine_grained_elements.append(e1)
+        
+        # 遍历检索并重排后的所有页面
+        for page in tqdm(pages, desc="Extracting Elements"):
+            image_path = page.crop_path
+            
+            # 安全检查
+            if not image_path or not os.path.exists(image_path):
+                print(f"Warning: Image path not found: {image_path}")
+                continue
+
+            try:
+                # --- 1. 调用 Agent 获取 BBox ---
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                
+                if loop and loop.is_running():
+                    print("Warning: Async event loop is already running. Cannot use asyncio.run(). Skipping this page.")
+                    continue
+                else:
+                    agent_output = asyncio.run(self.extractor.run_agent(
+                        user_text=query,
+                        image_paths=[image_path]
+                    ))
+                
+                if not agent_output:
+                    continue
+
+                # --- 2. 解析 Agent 输出 ---
+                predictions = agent_output.get("predictions", [])
+                if not predictions:
+                    continue
+                
+                last_msg_content = predictions[-1].get("content", "")
+                
+                # 提取 JSON 块
+                json_str = "[]"
+                match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+                if match:
+                    json_str = match.group(1).strip()
+                else:
+                    start = last_msg_content.find('[')
+                    end = last_msg_content.rfind(']')
+                    if start != -1 and end != -1:
+                        json_str = last_msg_content[start:end+1]
+
+                try:
+                    extracted_data = json.loads(json_str)
+                except json.JSONDecodeError:
+                    print(f"JSON Decode Error for page {page.corpus_id}")
+                    extracted_data = []
+
+                # --- 3. 处理每个提取的元素 (裁剪并保存) ---
+                if isinstance(extracted_data, list):
+                    # 打开原始图片准备裁剪
+                    try:
+                        original_img = Image.open(image_path)
+                        img_w, img_h = original_img.size
+                    except Exception as e:
+                        print(f"Failed to open image {image_path}: {e}")
+                        continue
+
+                    for item in extracted_data:
+                        bbox = item.get("bbox", [0, 0, 0, 0]) # 通常格式为 [x1, y1, x2, y2]
+                        evidence = item.get("evidence", "")
+                        
+                        # 默认 VLM 输出的 bbox 是基于 1000x1000 坐标系的归一化坐标
+                        # 如果模型输出是绝对像素，请注释掉下方的转换逻辑
+                        # -------------------------------------------------
+                        if len(bbox) == 4:
+                            x1, y1, x2, y2 = bbox
+                            # 转换为实际像素坐标
+                            x1 = int(x1 / 1000 * img_w)
+                            y1 = int(y1 / 1000 * img_h)
+                            x2 = int(x2 / 1000 * img_w)
+                            y2 = int(y2 / 1000 * img_h)
+                            
+                            # 边界修正，防止越界
+                            x1 = max(0, x1)
+                            y1 = max(0, y1)
+                            x2 = min(img_w, x2)
+                            y2 = min(img_h, y2)
+                            
+                            current_crop_path = image_path # 默认回退到原图
+                            
+                            # 只有当 bbox 有效且有面积时才进行裁剪
+                            if x2 > x1 and y2 > y1:
+                                try:
+                                    # 执行裁剪
+                                    cropped_img = original_img.crop((x1, y1, x2, y2))
+                                    
+                                    # 生成唯一文件名
+                                    filename = f"{os.path.basename(page.corpus_id).split('.')[0]}_{uuid.uuid4().hex[:8]}.jpg"
+                                    save_path = os.path.join(workspace_dir, filename)
+                                    
+                                    # 保存到本地 workspace
+                                    cropped_img.save(save_path)
+                                    current_crop_path = save_path # 更新路径为新裁剪图片的路径
+                                except Exception as crop_err:
+                                    print(f"Error cropping image: {crop_err}")
+                        else:
+                            current_crop_path = image_path
+                        # -------------------------------------------------
+
+                        # 构造新的精细化元素
+                        element = PageElement(
+                            bbox=bbox, # 保留原始 bbox 数据 (通常是 1000 scale)
+                            type="evidence",
+                            content=evidence,
+                            corpus_id=page.corpus_id,
+                            crop_path=current_crop_path # <--- 这里已更新为裁剪后的本地路径
+                        )
+                        
+                        if hasattr(page, 'retrieval_score'):
+                            element.retrieval_score = page.retrieval_score
+                            
+                        fine_grained_elements.append(element)
+                        
+            except Exception as e:
+                print(f"Error during extraction on {page.corpus_id}: {e}")
+
+        if not fine_grained_elements:
+            print("No fine-grained elements extracted.")
+            
         return fine_grained_elements
 
-    def pipeline(self, query: str, top_k=100) -> List[PageElement]:
+    def pipeline(self, query: str, top_k=5) -> List[PageElement]:
         """Full RAG Pipeline"""
-        pages = self.retrieve(query, top_k=2*top_k)
+        # 1. 粗排检索
+        pages = self.retrieve(query, top_k=top_k*2)
+        # 2. 重排序
         ranked_pages = self.rerank(query, pages)
         ranked_pages = ranked_pages[:top_k]
+        # 3. 精细化提取
         elements = self.extract_elements_from_pages(ranked_pages, query)
         return elements
 
 if __name__ == "__main__":
+    # 配置路径
     embedding_model_path = "/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Embedding-8B"
     reranker_model_path = "/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B"
     root_dir = "/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V"
-
+    
+    # 模拟工具和 Extractor 的初始化参数
+    from src.agents.utils import ImageZoomOCRTool
+    # 假设有一个工作目录
+    tool_work_dir = "./workspace" 
+    
     print("Initializing Models...")
     embedder = Qwen3VLEmbedder(model_name_or_path=embedding_model_path, torch_dtype=torch.float16)
     reranker = Qwen3VLReranker(model_name_or_path=reranker_model_path, torch_dtype=torch.float16)
+    
+    # 初始化 Extractor (需要真实可用的 API Key 和 URL)
+    # 这里仅为示例代码，实际运行时需替换为有效配置
+    tool = ImageZoomOCRTool(work_dir=tool_work_dir)
+    extractor = ElementExtractor(
+        # base_url="http://localhost:3888/v1",
+        # api_key="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR",
+        # model_name="qwen3-vl-plus",
+        base_url="http://localhost:8001/v1",
+        api_key="sk-123456",
+        model_name="MinerU-Agent-CK300",
+        tool=tool
+    )
 
-    loader = FinRAGLoader(data_root=root_dir, lang="ch", embedding_model=embedder, rerank_model=reranker)
+    loader = FinRAGLoader(
+        data_root=root_dir, 
+        lang="ch", 
+        embedding_model=embedder, 
+        rerank_model=reranker,
+        extractor=extractor # 传入 extractor
+    )
+    
     loader.load_data()
     
-    # 强制重建索引以应用 HNSW if force_rebuild=True
-    loader.build_page_vector_pool(batch_size=128, force_rebuild=False)
+    # 建立索引 (如果不存在)
+    loader.build_page_vector_pool(batch_size=16)
     
     if len(loader.samples) > 0:
         test_query = loader.samples[0].query
         print(f"\nTesting Query: {test_query}")
-        results = loader.pipeline(test_query, top_k=5)
+        # 运行 pipeline
+        results = loader.pipeline(test_query, top_k=2) # 仅测试 Top 2 以节省时间
         print(f"\nFinal Elements Retrieved ({len(results)}):")
         for res in results:
-            print(f"- {res.content[:50]}... (Score: {getattr(res, 'retrieval_score', 0.0):.4f})")
+            print(f"- [Evidence] {res.content} (BBox: {res.bbox})")

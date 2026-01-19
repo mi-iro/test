@@ -2,7 +2,7 @@ import re
 import json
 import asyncio
 from typing import List, Dict, Optional
-from utils import *
+from .utils import *
 
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
