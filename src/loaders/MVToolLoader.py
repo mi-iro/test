@@ -2,23 +2,28 @@ import os
 import json
 import re
 import sys
+import asyncio
 from typing import List, Dict, Any, Optional
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
+from src.agents.ElementExtractor import ElementExtractor
 
 class MVToolLoader(BaseDataLoader):
     """
     MVToolBench 数据集加载器。
     该数据集主要用于单图 VQA 任务，包含带有 BBox 的 Ground Truth。
     """
-    def __init__(self, data_root: str):
+    def __init__(self, data_root: str, extractor: Optional[ElementExtractor] = None):
         """
         :param data_root: 包含 mvtoolbench_full.json 的根目录路径
+        :param extractor: ElementExtractor 实例，用于执行 pipeline 提取任务
         """
         super().__init__(data_root)
+        self.extractor = extractor
+        
         # 尝试定位 json 文件，默认在 root 下，也可以兼容直接传入文件路径
         if data_root.endswith(".json") and os.path.isfile(data_root):
             self.json_path = data_root
@@ -111,11 +116,118 @@ class MVToolLoader(BaseDataLoader):
             
         print(f"✅ Successfully loaded {count} MVTool samples.")
 
+    def pipeline(self, query: str, image_paths: List[str] = None) -> List[PageElement]:
+        """
+        利用 ElementExtractor 从给定的图像中提取能够回答 Query 的证据元素。
+        
+        :param query: 用户的查询文本
+        :param image_paths: 待处理的图像路径列表。对于 MVTool，通常是单张图片。
+        :return: 提取出的 PageElement 列表
+        """
+        if self.extractor is None:
+            print("Error: ElementExtractor is not initialized in MVToolLoader.")
+            return []
+
+        if not image_paths:
+            print("Warning: No image_paths provided for MVTool pipeline. Returning empty list.")
+            return []
+
+        # 执行 Agent (ElementExtractor 是异步的，这里使用 asyncio.run 封装调用)
+        try:
+            # 检查是否已有运行中的 loop (防止在 Jupyter 等环境中报错)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # 如果已经在异步环境中，建议由调用者直接调用 extractor，此处为了兼容同步接口只能抛出警告或尝试 nesting
+                print("Warning: pipeline called within a running event loop. Please handle async properly.")
+                # 在已有 loop 中使用 nest_asyncio 或类似的补丁可能可行，这里简单返回空
+                return []
+            else:
+                agent_output = asyncio.run(self.extractor.run_agent(
+                    user_text=query,
+                    image_paths=image_paths
+                ))
+        except Exception as e:
+            print(f"Agent execution failed: {e}")
+            return []
+
+        if not agent_output:
+            return []
+
+        # 解析 Agent 的输出
+        # run_agent 返回的结构是 {"predictions": [...], "images": [...]}
+        predictions = agent_output.get("predictions", [])
+        if not predictions:
+            return []
+
+        # 获取 Agent 的最后一条回复，其中包含 JSON 格式的证据
+        last_message = predictions[-1]
+        content = last_message.get("content", "")
+
+        extracted_elements = []
+        try:
+            # 尝试提取 ```json ... ``` 块
+            json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1).strip()
+            else:
+                # 如果没有代码块，尝试查找列表边界 [ ... ]
+                start = content.find('[')
+                end = content.rfind(']')
+                if start != -1 and end != -1:
+                    json_str = content[start:end+1]
+                else:
+                    # 无法解析，跳过
+                    json_str = "[]"
+
+            data = json.loads(json_str)
+
+            # ElementExtractor 约定输出格式为 List[Dict]
+            if isinstance(data, list):
+                for item in data:
+                    bbox = item.get("bbox", [0, 0, 0, 0])
+                    evidence = item.get("evidence", "")
+                    
+                    # 确保 bbox 格式正确
+                    if not isinstance(bbox, list) or len(bbox) != 4:
+                        bbox = [0, 0, 0, 0]
+
+                    element = PageElement(
+                        bbox=bbox,
+                        type="evidence",
+                        content=evidence,
+                        corpus_id=image_paths[0], # 关联到输入的第一张图片
+                        crop_path=None 
+                    )
+                    extracted_elements.append(element)
+            elif isinstance(data, dict):
+                 # 处理可能返回单个对象的情况
+                 bbox = data.get("bbox", [0, 0, 0, 0])
+                 evidence = data.get("evidence", "")
+                 element = PageElement(
+                    bbox=bbox,
+                    type="evidence",
+                    content=evidence,
+                    corpus_id=image_paths[0],
+                    crop_path=None 
+                 )
+                 extracted_elements.append(element)
+
+        except json.JSONDecodeError:
+            print(f"Failed to parse JSON from agent response: {content[-100:]}")
+        except Exception as e:
+            print(f"Error converting agent output to PageElement: {e}")
+
+        return extracted_elements
+
 if __name__ == "__main__":
     # 测试代码
-    # 假设当前目录下有 mvtoolbench_full.json
     root_dir = "/mnt/shared-storage-user/mineru3-share/jiayu/newBench/dataOri/MVToolBench/mvtoolbench_benchmark"
     
+    # 示例: 初始化 Loader 时不带 Extractor (仅加载数据)
     loader = MVToolLoader(data_root=root_dir)
     try:
         loader.load_data()
@@ -124,8 +236,13 @@ if __name__ == "__main__":
             print(f"\nSample 0 ID: {s.qid}")
             print(f"Query: {s.query}")
             print(f"Image: {s.data_source}")
-            print(f"Gold Answer: {s.gold_answer}")
-            if s.gold_elements:
-                print(f"Gold BBox: {s.gold_elements[0].bbox}")
+            
+            # 若要测试 pipeline，需要初始化 ElementExtractor 并传入
+            from src.agents.utils import ImageZoomOCRTool
+            tool = ImageZoomOCRTool(work_dir="/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/src/agents/workspace")
+            extractor = ElementExtractor(base_url="http://localhost:8002/v1", model_name="MinerU-Agent-CK300", tool=tool)
+            loader.extractor = extractor
+            results = loader.pipeline(s.query, image_paths=[s.data_source])
+            
     except FileNotFoundError as e:
         print(e)

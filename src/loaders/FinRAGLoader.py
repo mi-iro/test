@@ -216,7 +216,7 @@ class FinRAGLoader(BaseDataLoader):
             
             element = PageElement(
                 bbox=[0, 0, 1000, 1000],
-                type="image_page",
+                type="page_image",
                 content=f"[Page Retrieved] {rel_path}",
                 corpus_id=rel_path,
                 crop_path=abs_path 
@@ -265,10 +265,11 @@ class FinRAGLoader(BaseDataLoader):
             fine_grained_elements.append(e1)
         return fine_grained_elements
 
-    def pipeline(self, query: str, top_k=5) -> List[PageElement]:
+    def pipeline(self, query: str, top_k=100) -> List[PageElement]:
         """Full RAG Pipeline"""
-        pages = self.retrieve(query, top_k=top_k)
+        pages = self.retrieve(query, top_k=2*top_k)
         ranked_pages = self.rerank(query, pages)
+        ranked_pages = ranked_pages[:top_k]
         elements = self.extract_elements_from_pages(ranked_pages, query)
         return elements
 
@@ -284,13 +285,13 @@ if __name__ == "__main__":
     loader = FinRAGLoader(data_root=root_dir, lang="ch", embedding_model=embedder, rerank_model=reranker)
     loader.load_data()
     
-    # 强制重建索引以应用 HNSW
+    # 强制重建索引以应用 HNSW if force_rebuild=True
     loader.build_page_vector_pool(batch_size=128, force_rebuild=False)
     
     if len(loader.samples) > 0:
         test_query = loader.samples[0].query
         print(f"\nTesting Query: {test_query}")
-        results = loader.pipeline(test_query, top_k=3)
+        results = loader.pipeline(test_query, top_k=5)
         print(f"\nFinal Elements Retrieved ({len(results)}):")
         for res in results:
             print(f"- {res.content[:50]}... (Score: {getattr(res, 'retrieval_score', 0.0):.4f})")
