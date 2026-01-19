@@ -3,7 +3,9 @@ import json
 import re
 import sys
 import asyncio
+import uuid
 from typing import List, Dict, Any, Optional
+from PIL import Image
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -132,6 +134,10 @@ class MVToolLoader(BaseDataLoader):
             print("Warning: No image_paths provided for MVTool pipeline. Returning empty list.")
             return []
 
+        # 定义裁剪图片保存的本地工作目录
+        workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
+        os.makedirs(workspace_dir, exist_ok=True)
+
         # 执行 Agent (ElementExtractor 是异步的，这里使用 asyncio.run 封装调用)
         try:
             # 检查是否已有运行中的 loop (防止在 Jupyter 等环境中报错)
@@ -143,7 +149,6 @@ class MVToolLoader(BaseDataLoader):
             if loop and loop.is_running():
                 # 如果已经在异步环境中，建议由调用者直接调用 extractor，此处为了兼容同步接口只能抛出警告或尝试 nesting
                 print("Warning: pipeline called within a running event loop. Please handle async properly.")
-                # 在已有 loop 中使用 nest_asyncio 或类似的补丁可能可行，这里简单返回空
                 return []
             else:
                 agent_output = asyncio.run(self.extractor.run_agent(
@@ -185,8 +190,22 @@ class MVToolLoader(BaseDataLoader):
 
             data = json.loads(json_str)
 
-            # ElementExtractor 约定输出格式为 List[Dict]
+            # 统一将单个对象转换为列表以复用逻辑
+            if isinstance(data, dict):
+                data = [data]
+
             if isinstance(data, list):
+                # 准备处理图像 (MVTool 通常是单图，取第一个)
+                image_path = image_paths[0]
+                original_img = None
+                img_w, img_h = 0, 0
+                
+                try:
+                    original_img = Image.open(image_path)
+                    img_w, img_h = original_img.size
+                except Exception as e:
+                    print(f"Failed to open image {image_path}: {e}")
+
                 for item in data:
                     bbox = item.get("bbox", [0, 0, 0, 0])
                     evidence = item.get("evidence", "")
@@ -195,26 +214,47 @@ class MVToolLoader(BaseDataLoader):
                     if not isinstance(bbox, list) or len(bbox) != 4:
                         bbox = [0, 0, 0, 0]
 
+                    current_crop_path = image_path # 默认回退到原图
+
+                    # 执行坐标转换和裁剪 (仿照 FinRAGLoader)
+                    if original_img:
+                        x1, y1, x2, y2 = bbox
+                        # 假设模型输出是 0-1000 的归一化坐标
+                        x1 = int(x1 / 1000 * img_w)
+                        y1 = int(y1 / 1000 * img_h)
+                        x2 = int(x2 / 1000 * img_w)
+                        y2 = int(y2 / 1000 * img_h)
+                        
+                        # 边界修正
+                        x1 = max(0, x1)
+                        y1 = max(0, y1)
+                        x2 = min(img_w, x2)
+                        y2 = min(img_h, y2)
+                        
+                        # 只有当 bbox 有效且有面积时才进行裁剪
+                        if x2 > x1 and y2 > y1:
+                            try:
+                                # 执行裁剪
+                                cropped_img = original_img.crop((x1, y1, x2, y2))
+                                
+                                # 生成唯一文件名
+                                filename = f"{os.path.basename(image_path).split('.')[0]}_{uuid.uuid4().hex[:8]}.jpg"
+                                save_path = os.path.join(workspace_dir, filename)
+                                
+                                # 保存到本地 workspace
+                                cropped_img.save(save_path)
+                                current_crop_path = save_path # 更新路径为新裁剪图片的路径
+                            except Exception as crop_err:
+                                print(f"Error cropping image: {crop_err}")
+
                     element = PageElement(
                         bbox=bbox,
                         type="evidence",
                         content=evidence,
-                        corpus_id=image_paths[0], # 关联到输入的第一张图片
-                        crop_path=None 
+                        corpus_id=image_path,
+                        crop_path=current_crop_path 
                     )
                     extracted_elements.append(element)
-            elif isinstance(data, dict):
-                 # 处理可能返回单个对象的情况
-                 bbox = data.get("bbox", [0, 0, 0, 0])
-                 evidence = data.get("evidence", "")
-                 element = PageElement(
-                    bbox=bbox,
-                    type="evidence",
-                    content=evidence,
-                    corpus_id=image_paths[0],
-                    crop_path=None 
-                 )
-                 extracted_elements.append(element)
 
         except json.JSONDecodeError:
             print(f"Failed to parse JSON from agent response: {content[-100:]}")
@@ -239,10 +279,22 @@ if __name__ == "__main__":
             
             # 若要测试 pipeline，需要初始化 ElementExtractor 并传入
             from src.agents.utils import ImageZoomOCRTool
-            tool = ImageZoomOCRTool(work_dir="/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/src/agents/workspace")
-            extractor = ElementExtractor(base_url="http://localhost:8002/v1", model_name="MinerU-Agent-CK300", tool=tool)
+            # 确保 workspace 目录存在
+            tool_work_dir = "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/src/agents/workspace"
+            tool = ImageZoomOCRTool(work_dir=tool_work_dir)
+            
+            # 注意：这里的 API Key 和 URL 需要根据实际环境配置
+            extractor = ElementExtractor(
+                base_url="http://localhost:8001/v1", 
+                api_key="sk-123456", 
+                model_name="MinerU-Agent-CK300", 
+                tool=tool
+            )
             loader.extractor = extractor
             results = loader.pipeline(s.query, image_paths=[s.data_source])
+            print(f"Extracted {len(results)} elements.")
+            for res in results:
+                print(f" - Content: {res.content[:50]}... | Crop: {res.crop_path}")
             
     except FileNotFoundError as e:
         print(e)
