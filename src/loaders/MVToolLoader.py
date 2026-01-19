@@ -294,7 +294,7 @@ if __name__ == "__main__":
             results = loader.pipeline(s.query, image_paths=[s.data_source])
             print(f"Extracted {len(results)} elements.")
             for res in results:
-                print(f" - Content: {res.content[:50]}... \n - Crop: {res.crop_path}")
+                print(f" - Content: {res.content} \n - Crop: {res.crop_path}")
             
     except FileNotFoundError as e:
         print(e)

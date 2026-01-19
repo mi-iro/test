@@ -535,4 +535,4 @@ if __name__ == "__main__":
         results = loader.pipeline(test_query, top_k=10) # 仅测试 Top 2 以节省时间
         print(f"\nFinal Elements Retrieved ({len(results)}):")
         for res in results:
-            print(f" - Content: {res.content[:50]}... \n - Crop: {res.crop_path}")
+            print(f" - Content: {res.content} \n - Crop: {res.crop_path}")

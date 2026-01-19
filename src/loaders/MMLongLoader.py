@@ -4,6 +4,8 @@ import re
 import sys
 import ast
 import asyncio
+import uuid
+from PIL import Image
 from typing import List, Dict, Any, Optional
 
 # Adjust path to ensure we can import from src and scripts
@@ -186,6 +188,7 @@ class MMLongLoader(BaseDataLoader):
         """
         利用 ElementExtractor 从文档/图像中提取答案。
         如果输入路径包含 PDF，会自动将其拆分为图片并映射。
+        每次只向 Agent 输入一张图片，并对提取到的 BBox 进行裁剪。
         """
         if self.extractor is None:
             print("Error: ElementExtractor is not initialized in MMLongLoader.")
@@ -212,88 +215,125 @@ class MMLongLoader(BaseDataLoader):
             print("Warning: No valid images found after processing input paths.")
             return []
             
-        # 使用处理后的图片列表 (可能是多页)
-        # 注意：MMLongBench 通常是长文档，如果页数过多，直接全部输入给 Agent 可能会超长
-        # 这里暂时按全部传入处理，或者根据具体策略 (如只传前N页) 进行调整
-        # 这里假设 extractor.run_agent 能处理列表
-        
-        # 执行 Agent (通常只处理第一张图，或者需要修改 Agent 支持多图)
-        # 考虑到 MVTool 和 FinRAG 主要是单图或 Retrieved Pages，这里如果文档很长，可能需要切分
-        # 但为了保持 pipeline 接口一致，我们将所有图片传给 agent，由 agent 决定 (或仅取第一页)
-        # *修正*: ElementExtractor 的 run_agent 接受 image_paths list。
-        
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                print("Warning: pipeline called within a running event loop. Please handle async properly.")
-                return []
-            else:
-                agent_output = asyncio.run(self.extractor.run_agent(
-                    user_text=query,
-                    image_paths=processed_image_paths  # 传入转换后的所有图片路径
-                ))
-        except Exception as e:
-            print(f"Agent execution failed: {e}")
-            return []
-
-        if not agent_output:
-            return []
-
-        # 解析 Agent 输出
-        predictions = agent_output.get("predictions", [])
-        if not predictions:
-            return []
-
-        last_message = predictions[-1]
-        content = last_message.get("content", "")
+        # 定义裁剪图片保存的本地工作目录
+        workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
+        os.makedirs(workspace_dir, exist_ok=True)
 
         extracted_elements = []
-        try:
-            json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1).strip()
-            else:
-                start = content.find('[')
-                end = content.rfind(']')
-                if start != -1 and end != -1:
-                    json_str = content[start:end+1]
+
+        # 遍历所有图片，逐张调用 Agent
+        for img_path in processed_image_paths:
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop and loop.is_running():
+                    print("Warning: pipeline called within a running event loop. Please handle async properly.")
+                    continue
                 else:
-                    json_str = "[]"
+                    # 修改点：将单张图片包装成 list 传入，满足 Agent 接口要求
+                    agent_output = asyncio.run(self.extractor.run_agent(
+                        user_text=query,
+                        image_paths=[img_path]  
+                    ))
+                
+                if not agent_output:
+                    continue
 
-            data = json.loads(json_str)
+                # 解析 Agent 输出
+                predictions = agent_output.get("predictions", [])
+                if not predictions:
+                    continue
 
-            # 统一处理 list 或 dict
-            if isinstance(data, dict):
-                data = [data]
+                last_message = predictions[-1]
+                content = last_message.get("content", "")
 
-            if isinstance(data, list):
-                for item in data:
-                    bbox = item.get("bbox", [0, 0, 0, 0])
-                    evidence = item.get("evidence", "")
-                    
-                    if not isinstance(bbox, list) or len(bbox) != 4:
-                        bbox = [0, 0, 0, 0]
+                extracted_data = []
+                try:
+                    json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1).strip()
+                    else:
+                        start = content.find('[')
+                        end = content.rfind(']')
+                        if start != -1 and end != -1:
+                            json_str = content[start:end+1]
+                        else:
+                            json_str = "[]"
 
-                    # 注意：如果输入是多页 PDF，这里的 corpus_id 需要指明是哪一页
-                    # 目前 Agent 输出通常不包含页码信息，除非 Prompt 强制要求
-                    # 这里暂时默认关联到第一张图片，或者整个文档 ID
-                    # 如果需要精确对应页码，Agent 需要返回 page_index
-                    
-                    element = PageElement(
-                        bbox=bbox,
-                        type="evidence",
-                        content=evidence,
-                        corpus_id=processed_image_paths[0] if processed_image_paths else "", # 暂时关联第一个
-                        crop_path=None 
-                    )
-                    extracted_elements.append(element)
+                    extracted_data = json.loads(json_str)
+                except Exception as e:
+                    print(f"Error parsing JSON for {img_path}: {e}")
+                    extracted_data = []
 
-        except Exception as e:
-            print(f"Error converting agent output to PageElement: {e}")
+                # 统一处理 list 或 dict
+                if isinstance(extracted_data, dict):
+                    extracted_data = [extracted_data]
+
+                if isinstance(extracted_data, list):
+                    # 尝试打开当前图片，准备裁剪
+                    current_page_image = None
+                    img_w, img_h = 0, 0
+                    try:
+                        current_page_image = Image.open(img_path)
+                        img_w, img_h = current_page_image.size
+                    except Exception as e:
+                        print(f"Failed to open image for cropping {img_path}: {e}")
+
+                    for item in extracted_data:
+                        bbox = item.get("bbox", [0, 0, 0, 0])
+                        evidence = item.get("evidence", "")
+                        
+                        if not isinstance(bbox, list) or len(bbox) != 4:
+                            bbox = [0, 0, 0, 0]
+                        
+                        current_crop_path = img_path # 默认 crop_path 为整页
+                        
+                        # --- 裁剪逻辑开始 ---
+                        # 仅当 bbox 有效且图片加载成功时执行
+                        if current_page_image and bbox != [0, 0, 0, 0]:
+                            try:
+                                x1, y1, x2, y2 = bbox
+                                # 假设模型输出是 0-1000 的归一化坐标
+                                x1 = int(x1 / 1000 * img_w)
+                                y1 = int(y1 / 1000 * img_h)
+                                x2 = int(x2 / 1000 * img_w)
+                                y2 = int(y2 / 1000 * img_h)
+                                
+                                # 边界修正
+                                x1 = max(0, x1)
+                                y1 = max(0, y1)
+                                x2 = min(img_w, x2)
+                                y2 = min(img_h, y2)
+                                
+                                # 只有当 bbox 面积大于 0 时才裁剪
+                                if x2 > x1 and y2 > y1:
+                                    cropped_img = current_page_image.crop((x1, y1, x2, y2))
+                                    
+                                    # 生成唯一文件名
+                                    filename = f"{os.path.basename(img_path).split('.')[0]}_{uuid.uuid4().hex[:8]}.jpg"
+                                    save_path = os.path.join(workspace_dir, filename)
+                                    
+                                    cropped_img.save(save_path)
+                                    current_crop_path = save_path # 更新为裁剪路径
+                            except Exception as crop_err:
+                                print(f"Error cropping image on {img_path}: {crop_err}")
+                        # --- 裁剪逻辑结束 ---
+
+                        # corpus_id 对应具体的单页图片路径
+                        element = PageElement(
+                            bbox=bbox,
+                            type="evidence",
+                            content=evidence,
+                            corpus_id=img_path, 
+                            crop_path=current_crop_path # <--- 设置 crop_path
+                        )
+                        extracted_elements.append(element)
+
+            except Exception as e:
+                print(f"Error during agent execution on {img_path}: {e}")
 
         return extracted_elements
 
@@ -333,7 +373,8 @@ if __name__ == "__main__":
                 results = loader.pipeline(s.query, image_paths=[s.data_source])
                 print(f"Extracted {len(results)} elements.")
                 for res in results:
-                    print(f" - Content: {res.content[:50]}...")
+                    print(f" - Content: {res.content}")
+                    print(f" - Crop Path: {res.crop_path}")
             else:
                 print("Skipping PDF pipeline test (sample is not PDF).")
             
