@@ -2,7 +2,9 @@ import os
 import sys
 import json
 import re
-from typing import List, Dict, Any, Optional
+import base64
+import mimetypes
+from typing import List, Dict, Any, Optional, Union, Tuple
 
 # 假设文件结构，确保可以导入 src 下的模块
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -13,6 +15,25 @@ from src.agents.RAGAgent import RAGAgent
 
 # 复用 utils 中的正则匹配，或者重新定义以确保健壮性
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+def local_image_to_data_url(path: str) -> str:
+    """
+    将本地图片转换为 Data URL (Base64)
+    """
+    if not path or not os.path.exists(path):
+        return ""
+    
+    mime, _ = mimetypes.guess_type(path)
+    if mime is None:
+        mime = "image/png"
+
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
+    except Exception as e:
+        print(f"Error encoding image {path}: {e}")
+        return ""
 
 # --- System Prompt 定义 ---
 AGENTIC_SYSTEM_PROMPT = """你是一个智能文档问答助手 (Agentic RAG Agent)。你的目标是通过检索文档中的证据来准确回答用户的复杂问题。
@@ -61,7 +82,7 @@ class AgenticRAGAgent(RAGAgent):
         loader: BaseDataLoader, 
         base_url: str, 
         api_key: str, 
-        model_name: str,
+        model_name: str, 
         max_rounds: int
     ):
         """
@@ -87,10 +108,11 @@ class AgenticRAGAgent(RAGAgent):
             print(f"Error parsing tool call JSON: {match.group(1)}")
             return None
 
-    def _execute_tool(self, tool_name: str, args: Dict) -> str:
+    def _execute_tool(self, tool_name: str, args: Dict) -> Union[str, List[Dict[str, Any]]]:
         """
         执行工具调用。
-        这里将 loader.pipeline 封装为 'search_evidence_tool'。
+        将检索到的 PageElement 转换为多模态消息内容 (List[Dict])。
+        包含: 页面原图(Page Image) + 证据截图(Crop) + 文本内容(Content)。
         """
         if tool_name == "search_evidence_tool":
             query = args.get("query", "")
@@ -109,15 +131,33 @@ class AgenticRAGAgent(RAGAgent):
                 if not elements:
                     return "No relevant evidence found."
                 
-                # 格式化返回给 LLM 的观察结果
-                observations = []
-                for i, el in enumerate(elements):
-                    content = el.content.strip()
-                    # 包含 bbox 或页码信息有助于 LLM 定位
-                    source_info = f"(Page/Image: {os.path.basename(el.corpus_id)})" if el.corpus_id else ""
-                    observations.append(f"Evidence {i+1} {source_info}: {content}")
+                # 构造多模态 Tool Response
+                content_list = []
+                content_list.append({"type": "text", "text": "<tool_response>\nFound the following evidence:\n"})
                 
-                return "\n".join(observations)
+                for i, el in enumerate(elements):
+                    content_list.append({"type": "text", "text": f"\n--- Evidence {i+1} ---\n"})
+                    
+                    # 1. 元素所在页面图像 (Page Image)
+                    if el.corpus_id:
+                        img_url = local_image_to_data_url(el.corpus_id)
+                        if img_url:
+                             content_list.append({"type": "text", "text": f"[Page Source: {os.path.basename(el.corpus_id)}]\n"})
+                             content_list.append({"type": "image_url", "image_url": {"url": img_url}})
+                    
+                    # 2. 元素截图 (Evidence Crop)
+                    # 如果 crop_path 存在且与 corpus_id 不同（避免重复展示全页），则展示
+                    if el.crop_path and el.crop_path != el.corpus_id:
+                        crop_url = local_image_to_data_url(el.crop_path)
+                        if crop_url:
+                            content_list.append({"type": "text", "text": "\n[Evidence Detail Crop]\n"})
+                            content_list.append({"type": "image_url", "image_url": {"url": crop_url}})
+                    
+                    # 3. 元素文本内容
+                    content_list.append({"type": "text", "text": f"\nContent: {el.content}\n"})
+                
+                content_list.append({"type": "text", "text": "\n</tool_response>"})
+                return content_list
             
             except Exception as e:
                 return f"Error during retrieval: {str(e)}"
@@ -125,9 +165,10 @@ class AgenticRAGAgent(RAGAgent):
         else:
             return f"Error: Unknown tool '{tool_name}'."
 
-    def run_agent_loop(self, query: str) -> str:
+    def run_agent_loop(self, query: str) -> Tuple[str, List[Dict]]:
         """
         执行 ReAct 循环的核心异步方法。
+        返回: (final_answer, full_messages_history)
         """
         messages = [
             {"role": "system", "content": AGENTIC_SYSTEM_PROMPT},
@@ -146,7 +187,7 @@ class AgenticRAGAgent(RAGAgent):
                 )
                 content = response.choices[0].message.content
                 messages.append({"role": "assistant", "content": content})
-                print(f"Round {i+1} Assistant: {content[:100]}...") # 打印部分思考以便调试
+                print(f"Round {i+1} Assistant: {content[:100]}...") 
 
             except Exception as e:
                 print(f"LLM API Error: {e}")
@@ -164,8 +205,13 @@ class AgenticRAGAgent(RAGAgent):
                 tool_result = self._execute_tool(tool_name, tool_args)
                 
                 # 4. 构造 Tool Response
-                tool_msg_content = f"<tool_response>\n{tool_result}\n</tool_response>"
-                messages.append({"role": "user", "content": tool_msg_content})
+                if isinstance(tool_result, list):
+                    # 如果返回是列表，说明是构造好的多模态消息
+                    messages.append({"role": "user", "content": tool_result})
+                else:
+                    # 如果是字符串（通常是错误信息），包装为文本消息
+                    tool_msg_content = f"<tool_response>\n{tool_result}\n</tool_response>"
+                    messages.append({"role": "user", "content": tool_msg_content})
                 
             else:
                 # 没有工具调用，说明 LLM 生成了最终回复
@@ -175,7 +221,7 @@ class AgenticRAGAgent(RAGAgent):
         if not final_answer and messages[-1]["role"] == "assistant":
             final_answer = messages[-1]["content"]
 
-        return final_answer
+        return final_answer, messages
 
     def process_sample(self, sample: StandardSample) -> StandardSample:
         """
@@ -189,15 +235,15 @@ class AgenticRAGAgent(RAGAgent):
         
         print(f"Processing Sample {sample.qid} with Agentic Logic...")
 
-        final_answer = self.run_agent_loop(query)
+        final_answer, history_messages = self.run_agent_loop(query)
 
         # 记录结果
         if sample.extra_info is None:
             sample.extra_info = {}
         
-        sample.extra_info['query_content'] = query
+        # 记录完整的对话历史，包含多模态证据
+        sample.extra_info['messages'] = history_messages
         sample.extra_info['final_answer'] = final_answer
-        sample.extra_info['agent_type'] = 'ReAct'
         
         return sample
 
@@ -225,10 +271,9 @@ if __name__ == "__main__":
     loader.load_data()
 
     # 4. 初始化 Agentic RAG Agent
-    # 注意：这里的 model_name 是用于 Agent 规划推理的 LLM，通常需要更强的逻辑能力 (如 GPT-4, Qwen-Max 等)
     agent = AgenticRAGAgent(
         loader=loader,
-        base_url="http://localhost:3888/v1", # 这里的 URL 是 Inference LLM
+        base_url="http://localhost:3888/v1", 
         model_name="qwen3-max",
         api_key="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR",
         max_rounds=5
@@ -240,3 +285,4 @@ if __name__ == "__main__":
         print("\n=== Final Result ===")
         print(f"Query: {result_sample.query}")
         print(f"Answer: {result_sample.extra_info['final_answer']}")
+        print(f"History Steps: {len(result_sample.extra_info['messages'])}")
