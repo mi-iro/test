@@ -2,13 +2,12 @@ import os
 import sys
 import json
 import re
-import asyncio
 from typing import List, Dict, Any, Optional
 
 # 假设文件结构，确保可以导入 src 下的模块
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from openai import AsyncOpenAI
+from openai import OpenAI
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from src.agents.RAGAgent import RAGAgent
 
@@ -73,7 +72,7 @@ class AgenticRAGAgent(RAGAgent):
         :param max_rounds: 最大交互/思考轮数，防止死循环。
         """
         super().__init__(loader)
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model_name = model_name
         self.max_rounds = max_rounds
 
@@ -126,7 +125,7 @@ class AgenticRAGAgent(RAGAgent):
         else:
             return f"Error: Unknown tool '{tool_name}'."
 
-    async def run_agent_loop(self, query: str) -> str:
+    def run_agent_loop(self, query: str) -> str:
         """
         执行 ReAct 循环的核心异步方法。
         """
@@ -140,7 +139,7 @@ class AgenticRAGAgent(RAGAgent):
         for i in range(self.max_rounds):
             # 1. LLM 生成 Thought 和 Potential Tool Call
             try:
-                response = await self.client.chat.completions.create(
+                response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
                     temperature=1.0 # ReAct 任务建议低温度以保持逻辑
@@ -189,29 +188,8 @@ class AgenticRAGAgent(RAGAgent):
         self.current_data_source = sample.data_source
         
         print(f"Processing Sample {sample.qid} with Agentic Logic...")
-        
-        # 运行异步循环 (由于 process_sample 通常在同步环境中被调用，这里用 asyncio.run 封装)
-        try:
-            # 检查是否已有 loop (如在 Jupyter 中)
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
 
-            if loop and loop.is_running():
-                # 如果已经在 Loop 中，这是比较棘手的情况。
-                # 理想情况是 RAGAgent.run_batch 也改为 async。
-                # 这里为了兼容性，只能提示错误或尝试 nest_asyncio
-                print("Warning: Event loop already running. Creating task...")
-                # 这种情况下，通常无法直接阻塞等待结果，这只是一个简单的 fallback
-                # 实际生产代码应将整个架构改为异步
-                final_answer = "Error: Async conflict. Please run in standard python script."
-            else:
-                final_answer = asyncio.run(self.run_agent_loop(query))
-        
-        except Exception as e:
-            print(f"Agent Loop Error: {e}")
-            final_answer = "Error executing agent."
+        final_answer = self.run_agent_loop(query)
 
         # 记录结果
         if sample.extra_info is None:
