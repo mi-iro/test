@@ -51,31 +51,12 @@ class RAGAgent:
         retrieved_elements: List[PageElement] = []
 
         try:
-            # 根据不同的 Loader 类型调用不同的 pipeline 接口
-            if isinstance(self.loader, FinRAGLoader):
-                # FinRAG 是基于全库检索的，不需要传入特定 image_path
-                # pipeline(query: str, top_k=5)
-                print(f"Running FinRAG pipeline for query: {query}")
-                retrieved_elements = self.loader.pipeline(query=query)
-
-            elif isinstance(self.loader, (MVToolLoader, MMLongLoader)):
-                # MVTool 和 MMLong 是基于单文档/单图的 QA
-                # pipeline(query: str, image_paths: List[str])
-                # data_source 存储了图片路径或 PDF 文档路径
-                source_path = sample.data_source
-                if source_path:
-                    print(f"Running Document/Image pipeline on: {source_path}")
-                    retrieved_elements = self.loader.pipeline(query=query, image_paths=[source_path])
-                else:
-                    print(f"Warning: No data_source found for sample {sample.qid}")
-
+            source_path = sample.data_source
+            if source_path:
+                print(f"Running Document/Image pipeline on: {source_path}")
+                retrieved_elements = self.loader.pipeline(query=query, image_paths=[source_path])
             else:
-                # 默认尝试通用接口（如果未来 base_loader 定义了统一 pipeline）
-                if hasattr(self.loader, 'pipeline'):
-                    retrieved_elements = self.loader.pipeline(query=query)
-                else:
-                    print(f"Error: Loader type {type(self.loader)} not supported or has no pipeline method.")
-
+                print(f"Warning: No data_source found for sample {sample.qid}")
         except Exception as e:
             print(f"Error processing sample {sample.qid}: {e}")
             retrieved_elements = []

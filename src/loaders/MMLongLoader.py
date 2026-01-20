@@ -184,7 +184,7 @@ class MMLongLoader(BaseDataLoader):
             
         return image_map
 
-    def pipeline(self, query: str, image_paths: List[str] = None) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None,  top_k: int = 5) -> List[PageElement]:
         """
         利用 ElementExtractor 从文档/图像中提取答案。
         如果输入路径包含 PDF，会自动将其拆分为图片并映射。

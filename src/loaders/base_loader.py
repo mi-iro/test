@@ -78,7 +78,7 @@ class BaseDataLoader(abc.ABC):
         for i in range(0, len(self.samples), batch_size):
             yield self.samples[i : i + batch_size]
             
-    def pipeline(self, query: str) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str], top_k: int) -> List[PageElement]:
         """
         根据查询检索页面元素。
         """

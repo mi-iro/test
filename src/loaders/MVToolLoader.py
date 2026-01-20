@@ -118,7 +118,7 @@ class MVToolLoader(BaseDataLoader):
             
         print(f"✅ Successfully loaded {count} MVTool samples.")
 
-    def pipeline(self, query: str, image_paths: List[str] = None) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None,  top_k: int = 5) -> List[PageElement]:
         """
         利用 ElementExtractor 从给定的图像中提取能够回答 Query 的证据元素。
         

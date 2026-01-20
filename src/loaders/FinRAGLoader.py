@@ -476,7 +476,7 @@ class FinRAGLoader(BaseDataLoader):
             
         return fine_grained_elements
 
-    def pipeline(self, query: str, top_k=5) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 5) -> List[PageElement]:
         """Full RAG Pipeline"""
         # 1. 粗排检索
         pages = self.retrieve(query, top_k=top_k*2)
