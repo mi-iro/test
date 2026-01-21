@@ -31,6 +31,7 @@ class FinRAGLoader(BaseDataLoader):
         self.query_path = os.path.join(data_root, "data", "queries", f"queries_{self.lang}.json")
         self.corpus_root = os.path.join(data_root, "data", "corpus", self.lang)
         self.qrels_path = os.path.join(data_root, "data", "qrels", f"qrels_{self.lang}.tsv")
+        self.citation_root = os.path.join(data_root, "data", "citation_labels", "citation_labels_new")
         
         # 索引路径
         cache_dir = os.path.join(data_root, "data", "indices")
@@ -63,7 +64,91 @@ class FinRAGLoader(BaseDataLoader):
                     qrels_map[qid].append(cid)
         return qrels_map
 
+    def load_bbox_data(self) -> None:
+        """
+        加载 selected_200_with_bboxes.json 数据集。
+        包含 Query, Answer, 以及 Ground Truth 的 BBox 和 Images。
+        """
+        # 构造特定文件的路径
+        json_file_path = os.path.join(self.citation_root, "selected_200_with_bboxes.json")
+        img_root_dir = self.citation_root
+
+        if not os.path.exists(json_file_path):
+            raise FileNotFoundError(f"Selected dataset file not found: {json_file_path}")
+        
+        print(f"Loading selected data from: {json_file_path}")
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        count = 0
+        for item in data:
+            qid = str(item.get("query-id") or item.get("id", str(count)))
+            query_text = item.get("query", "")
+            gold_answer = item.get("answer", "")
+            
+            # 解析 Metadata
+            extra_info = {
+                'category': item.get('category'),
+                'answer_type': item.get('answer_type'),
+                'human_eval': item.get('human_eval'),
+                'from_pages': item.get('from_pages')
+            }
+
+            # 解析 Ground Truth Pages 和 BBoxes
+            gold_pages = []
+            gold_elements = []
+            
+            # item["img_paths"] 示例: {"125": "./sampled_imgs/..."}
+            # item["bboxes"] 示例: {"125": [{"xmin": 0.1, ...}, ...]}
+            img_paths_map = item.get("img_paths", {})
+            bboxes_map = item.get("bboxes", {})
+            
+            for page_id, rel_path in img_paths_map.items():
+                # 拼接完整路径
+                full_img_path = os.path.normpath(os.path.join(img_root_dir, rel_path))
+                gold_pages.append(full_img_path)
+                
+                # 获取该页面的 BBox 并转换为 PageElement
+                page_bboxes = bboxes_map.get(page_id, [])
+                for box in page_bboxes:
+                    # JSON 中的 bbox 是 0.0-1.0 的 float，需要转换为 0-1000 的 int
+                    x1 = int(box.get("xmin", 0) * 1000)
+                    y1 = int(box.get("ymin", 0) * 1000)
+                    x2 = int(box.get("xmax", 0) * 1000)
+                    y2 = int(box.get("ymax", 0) * 1000)
+                    
+                    pe = PageElement(
+                        bbox=[x1, y1, x2, y2],
+                        type="evidence", 
+                        content=gold_answer, # GT 元素的内容通常即为答案或包含答案的片段
+                        corpus_id=full_img_path, # 标记所属图片
+                        crop_path=full_img_path  # GT 默认引用原图
+                    )
+                    gold_elements.append(pe)
+
+            # 构建 Sample
+            # data_source 默认为索引路径 (用于全库检索)，如果需要特定单图测试，可后续修改逻辑
+            sample = StandardSample(
+                qid=qid, 
+                query=query_text, 
+                dataset=f"finrag-{self.lang}-selected",
+                data_source=self.index_path, 
+                gold_answer=gold_answer,
+                gold_elements=gold_elements,
+                gold_pages=gold_pages, 
+                extra_info=extra_info
+            )
+            self.samples.append(sample)
+            count += 1
+            
+        print(f"✅ Successfully loaded {count} samples from selected_200_with_bboxes.json.")
+
     def load_data(self) -> None:
+        
+        if self.lang == 'bbox':
+            self.load_bbox_data()
+            return
+        
         """加载 Query 数据集并关联 Qrels。"""
         if not os.path.exists(self.query_path):
             raise FileNotFoundError(f"Query file not found: {self.query_path}")
@@ -91,6 +176,7 @@ class FinRAGLoader(BaseDataLoader):
             self.samples.append(sample)
             count += 1
         print(f"✅ Successfully loaded {count} queries.")
+    
 
     def _get_all_image_paths(self) -> List[str]:
         print(f"Scanning images in {self.corpus_root}...")
@@ -517,7 +603,7 @@ if __name__ == "__main__":
 
     loader = FinRAGLoader(
         data_root=root_dir, 
-        lang="ch", 
+        lang="bbox", 
         embedding_model=embedder, 
         rerank_model=reranker,
         extractor=extractor # 传入 extractor
