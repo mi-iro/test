@@ -6,10 +6,19 @@ import numpy as np
 import faiss
 import asyncio
 import re
+import base64
+import time
 from tqdm import tqdm
 from typing import List, Dict, Any, Optional
-from PIL import Image  # 需要安装 pillow: pip install pillow
+from PIL import Image
 import uuid
+
+# 引入评估所需的库
+try:
+    from rouge_score import rouge_scorer
+except ImportError:
+    print("Warning: rouge_score not installed. Install via `pip install rouge-score`.")
+    rouge_scorer = None
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -18,6 +27,33 @@ from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from scripts.qwen3_vl_embedding import Qwen3VLEmbedder
 from scripts.qwen3_vl_reranker import Qwen3VLReranker
 from src.agents.ElementExtractor import ElementExtractor
+from src.utils.llm_helper import create_llm_caller
+
+# ---------------------------------------------------------
+# Helper Functions (Ported from finragbench_utils.py & eval scripts)
+# ---------------------------------------------------------
+
+def encode_image_to_base64(image_path):
+    """Convert image to base64 encoding."""
+    if not os.path.exists(image_path):
+        return None
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def calculate_recall(expected_answer, actual_answer):
+    expected_tokens = set(expected_answer.strip().split())
+    actual_tokens = set(actual_answer.strip().split())
+    common_tokens = expected_tokens.intersection(actual_tokens)
+    if len(expected_tokens) == 0:
+        return 0 if len(actual_tokens) > 0 else 1
+    return len(common_tokens) / len(expected_tokens)
+
+def calculate_rouge(expected_answer, actual_answer):
+    if not rouge_scorer:
+        return 0.0
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+    scores = scorer.score(expected_answer, actual_answer)
+    return scores["rougeL"].fmeasure
 
 class FinRAGLoader(BaseDataLoader):
     def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
@@ -67,9 +103,7 @@ class FinRAGLoader(BaseDataLoader):
     def load_bbox_data(self) -> None:
         """
         加载 selected_200_with_bboxes.json 数据集。
-        包含 Query, Answer, 以及 Ground Truth 的 BBox 和 Images。
         """
-        # 构造特定文件的路径
         json_file_path = os.path.join(self.citation_root, "selected_200_with_bboxes.json")
         img_root_dir = self.citation_root
 
@@ -98,20 +132,15 @@ class FinRAGLoader(BaseDataLoader):
             gold_pages = []
             gold_elements = []
             
-            # item["img_paths"] 示例: {"125": "./sampled_imgs/..."}
-            # item["bboxes"] 示例: {"125": [{"xmin": 0.1, ...}, ...]}
             img_paths_map = item.get("img_paths", {})
             bboxes_map = item.get("bboxes", {})
             
             for page_id, rel_path in img_paths_map.items():
-                # 拼接完整路径
                 full_img_path = os.path.normpath(os.path.join(img_root_dir, rel_path))
                 gold_pages.append(full_img_path)
                 
-                # 获取该页面的 BBox 并转换为 PageElement
                 page_bboxes = bboxes_map.get(page_id, [])
                 for box in page_bboxes:
-                    # JSON 中的 bbox 是 0.0-1.0 的 float，需要转换为 0-1000 的 int
                     x1 = int(box.get("xmin", 0) * 1000)
                     y1 = int(box.get("ymin", 0) * 1000)
                     x2 = int(box.get("xmax", 0) * 1000)
@@ -120,19 +149,17 @@ class FinRAGLoader(BaseDataLoader):
                     pe = PageElement(
                         bbox=[x1, y1, x2, y2],
                         type="evidence", 
-                        content=gold_answer, # GT 元素的内容通常即为答案或包含答案的片段
-                        corpus_id=full_img_path, # 标记所属图片
-                        crop_path=full_img_path  # GT 默认引用原图
+                        content=gold_answer,
+                        corpus_id=full_img_path,
+                        crop_path=full_img_path
                     )
                     gold_elements.append(pe)
 
-            # 构建 Sample
-            # data_source 默认为索引路径 (用于全库检索)，如果需要特定单图测试，可后续修改逻辑
             sample = StandardSample(
                 qid=qid, 
                 query=query_text, 
-                dataset=f"finrag-{self.lang}-selected",
-                data_source=self.index_path, 
+                dataset=f"finrag-{self.lang}",
+                data_source=gold_pages[0],
                 gold_answer=gold_answer,
                 gold_elements=gold_elements,
                 gold_pages=gold_pages, 
@@ -204,9 +231,10 @@ class FinRAGLoader(BaseDataLoader):
         return embeddings.cpu().numpy().astype('float32')
 
     def build_page_vector_pool(self, batch_size=4, force_rebuild=False):
-        """
-        Build or load page-level vector index using HNSW.
-        """
+        """Build or load page-level vector index using HNSW."""
+        if self.lang == "bbox":
+            return
+        
         if not force_rebuild and os.path.exists(self.index_path) and os.path.exists(self.doc_map_path):
             print(f"Loading existing HNSW index from {self.index_path}...")
             self.index = faiss.read_index(self.index_path)
@@ -267,9 +295,7 @@ class FinRAGLoader(BaseDataLoader):
         print("HNSW Index build complete.")
 
     def retrieve(self, query: str, top_k: int = 5, ef_search: int = 64) -> List[PageElement]:
-        """
-        Step 1: Vector Search with HNSW
-        """
+        """Step 1: Vector Search with HNSW"""
         if self.index is None:
             raise RuntimeError("Index not built. Call build_page_vector_pool() first.")
 
@@ -325,134 +351,32 @@ class FinRAGLoader(BaseDataLoader):
         sorted_pages = sorted(pages, key=lambda x: x.retrieval_score, reverse=True)
         return sorted_pages
 
-    # def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
-    #     """
-    #     Step 3: Downstream Element Extraction using ElementExtractor.
-    #     Uses the ElementExtractor agent to find specific evidence on the retrieved pages.
-    #     """
-    #     if self.extractor is None:
-    #         print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
-    #         # 如果没有 extractor，可以返回原页面作为结果，或者返回空
-    #         return pages 
-
-    #     fine_grained_elements = []
-        
-    #     # 遍历检索并重排后的所有页面
-    #     for page in tqdm(pages, desc="Extracting Elements"):
-    #         image_path = page.crop_path
-            
-    #         # 安全检查
-    #         if not image_path or not os.path.exists(image_path):
-    #             print(f"Warning: Image path not found: {image_path}")
-    #             continue
-
-    #         try:
-    #             # 处理异步调用。如果当前已经在 loop 中（例如 Notebook 环境），直接调用可能会报错
-    #             # 这里使用简单的 asyncio.run，假设是在独立脚本中运行
-    #             try:
-    #                 loop = asyncio.get_running_loop()
-    #             except RuntimeError:
-    #                 loop = None
-                
-    #             if loop and loop.is_running():
-    #                 print("Warning: Async event loop is already running. Cannot use asyncio.run(). Skipping this page.")
-    #                 continue
-    #             else:
-    #                 agent_output = asyncio.run(self.extractor.run_agent(
-    #                     user_text=query,
-    #                     image_paths=[image_path]
-    #                 ))
-                
-    #             if not agent_output:
-    #                 continue
-
-    #             # --- 解析 Agent 输出 ---
-    #             predictions = agent_output.get("predictions", [])
-    #             if not predictions:
-    #                 continue
-                
-    #             # 获取最后一条回复内容
-    #             last_msg_content = predictions[-1].get("content", "")
-                
-    #             # 提取 JSON 块
-    #             json_str = "[]"
-    #             match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
-    #             if match:
-    #                 json_str = match.group(1).strip()
-    #             else:
-    #                 # 尝试查找最外层列表
-    #                 start = last_msg_content.find('[')
-    #                 end = last_msg_content.rfind(']')
-    #                 if start != -1 and end != -1:
-    #                     json_str = last_msg_content[start:end+1]
-
-    #             try:
-    #                 extracted_data = json.loads(json_str)
-    #             except json.JSONDecodeError:
-    #                 print(f"JSON Decode Error for page {page.corpus_id}")
-    #                 extracted_data = []
-
-    #             # 转换为 PageElement
-    #             if isinstance(extracted_data, list):
-    #                 for item in extracted_data:
-    #                     bbox = item.get("bbox", [0, 0, 0, 0])
-    #                     evidence = item.get("evidence", "")
-                        
-    #                     # 构造新的精细化元素
-    #                     element = PageElement(
-    #                         bbox=bbox,
-    #                         type="evidence",
-    #                         content=evidence,
-    #                         corpus_id=page.corpus_id,
-    #                         crop_path=image_path # 保留原图路径引用
-    #                     )
-    #                     # 继承页面的检索分数 (可选)
-    #                     if hasattr(page, 'retrieval_score'):
-    #                         element.retrieval_score = page.retrieval_score
-                            
-    #                     fine_grained_elements.append(element)
-                        
-    #         except Exception as e:
-    #             print(f"Error during extraction on {page.corpus_id}: {e}")
-
-    #     # 如果没有提取到任何精细化元素，可以考虑降级返回原页面，或者就返回空列表
-    #     if not fine_grained_elements:
-    #         print("No fine-grained elements extracted, returning empty list.")
-            
-    #     return fine_grained_elements
-
     def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
-        """
-        Step 3: Downstream Element Extraction using ElementExtractor.
-        Uses the ElementExtractor agent to find specific evidence on the retrieved pages.
-        """
+        """Step 3: Downstream Element Extraction using ElementExtractor."""
         if self.extractor is None:
             print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
             return pages 
 
-        # 定义裁剪图片保存的本地工作目录
         workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
         os.makedirs(workspace_dir, exist_ok=True)
 
         fine_grained_elements = []
         
-        # 遍历检索并重排后的所有页面
         for page in tqdm(pages, desc="Extracting Elements"):
             image_path = page.crop_path
             
-            # 安全检查
             if not image_path or not os.path.exists(image_path):
                 print(f"Warning: Image path not found: {image_path}")
                 continue
 
             try:
-                # --- 1. 调用 Agent 获取 BBox ---
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
                 
                 if loop and loop.is_running():
+                    # Handle async environment if needed
                     print("Warning: Async event loop is already running. Cannot use asyncio.run(). Skipping this page.")
                     continue
                 else:
@@ -464,14 +388,12 @@ class FinRAGLoader(BaseDataLoader):
                 if not agent_output:
                     continue
 
-                # --- 2. 解析 Agent 输出 ---
                 predictions = agent_output.get("predictions", [])
                 if not predictions:
                     continue
                 
                 last_msg_content = predictions[-1].get("content", "")
                 
-                # 提取 JSON 块
                 json_str = "[]"
                 match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
                 if match:
@@ -488,9 +410,7 @@ class FinRAGLoader(BaseDataLoader):
                     print(f"JSON Decode Error for page {page.corpus_id}")
                     extracted_data = []
 
-                # --- 3. 处理每个提取的元素 (裁剪并保存) ---
                 if isinstance(extracted_data, list):
-                    # 打开原始图片准备裁剪
                     try:
                         original_img = Image.open(image_path)
                         img_w, img_h = original_img.size
@@ -499,54 +419,38 @@ class FinRAGLoader(BaseDataLoader):
                         continue
 
                     for item in extracted_data:
-                        bbox = item.get("bbox", [0, 0, 0, 0]) # 通常格式为 [x1, y1, x2, y2]
+                        bbox = item.get("bbox", [0, 0, 0, 0])
                         evidence = item.get("evidence", "")
                         
-                        # 默认 VLM 输出的 bbox 是基于 1000x1000 坐标系的归一化坐标
-                        # 如果模型输出是绝对像素，请注释掉下方的转换逻辑
-                        # -------------------------------------------------
                         if len(bbox) == 4:
                             x1, y1, x2, y2 = bbox
-                            # 转换为实际像素坐标
                             x1 = int(x1 / 1000 * img_w)
                             y1 = int(y1 / 1000 * img_h)
                             x2 = int(x2 / 1000 * img_w)
                             y2 = int(y2 / 1000 * img_h)
                             
-                            # 边界修正，防止越界
-                            x1 = max(0, x1)
-                            y1 = max(0, y1)
-                            x2 = min(img_w, x2)
-                            y2 = min(img_h, y2)
+                            x1 = max(0, x1); y1 = max(0, y1); x2 = min(img_w, x2); y2 = min(img_h, y2)
                             
-                            current_crop_path = image_path # 默认回退到原图
+                            current_crop_path = image_path
                             
-                            # 只有当 bbox 有效且有面积时才进行裁剪
                             if x2 > x1 and y2 > y1:
                                 try:
-                                    # 执行裁剪
                                     cropped_img = original_img.crop((x1, y1, x2, y2))
-                                    
-                                    # 生成唯一文件名
                                     filename = f"{os.path.basename(page.corpus_id).split('.')[0]}_{uuid.uuid4().hex[:8]}.jpg"
                                     save_path = os.path.join(workspace_dir, filename)
-                                    
-                                    # 保存到本地 workspace
                                     cropped_img.save(save_path)
-                                    current_crop_path = save_path # 更新路径为新裁剪图片的路径
+                                    current_crop_path = save_path
                                 except Exception as crop_err:
                                     print(f"Error cropping image: {crop_err}")
                         else:
                             current_crop_path = image_path
-                        # -------------------------------------------------
 
-                        # 构造新的精细化元素
                         element = PageElement(
-                            bbox=bbox, # 保留原始 bbox 数据 (通常是 1000 scale)
+                            bbox=bbox, 
                             type="evidence",
                             content=evidence,
                             corpus_id=page.corpus_id,
-                            crop_path=current_crop_path # <--- 这里已更新为裁剪后的本地路径
+                            crop_path=current_crop_path 
                         )
                         
                         if hasattr(page, 'retrieval_score'):
@@ -564,14 +468,232 @@ class FinRAGLoader(BaseDataLoader):
 
     def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 5) -> List[PageElement]:
         """Full RAG Pipeline"""
-        # 1. 粗排检索
-        pages = self.retrieve(query, top_k=top_k*2)
-        # 2. 重排序
-        ranked_pages = self.rerank(query, pages)
-        ranked_pages = ranked_pages[:top_k]
-        # 3. 精细化提取
+        if self.lang == "bbox":
+            ranked_pages = [PageElement(bbox=[0,0,1000,1000],type="page_image",content=None,corpus_id=image_paths[0],crop_path=image_paths[0])]
+        else:
+            pages = self.retrieve(query, top_k=top_k*2)
+            ranked_pages = self.rerank(query, pages)
+            ranked_pages = ranked_pages[:top_k]
         elements = self.extract_elements_from_pages(ranked_pages, query)
         return elements
+
+    # --------------------------------------------------------------------------------
+    # Evaluation Methods (Integrated from finragbench_eval_generation.py & citation.py)
+    # --------------------------------------------------------------------------------
+
+    def _evaluate_answer_correctness(self, sample: StandardSample, eval_client=None) -> Dict[str, Any]:
+        """
+        基于 finragbench_eval_generation.py 的逻辑评估答案正确性。
+        支持 'short' 和 'long' 两种 answer_type。
+        """
+        query_text = sample.query
+        expected_answer = sample.gold_answer
+        # 从 extra_info 获取 answer_type，默认为 short
+        answer_type = sample.extra_info.get('answer_type', 'short') if sample.extra_info else 'short'
+        
+        # 实际答案
+        actual_answer = sample.extra_info.get('final_answer', "error output") if sample.extra_info else "error output"
+
+        em_score = recall_score = -1
+        rouge_score = model_eval = 0
+
+        # Short Answer Evaluation
+        if answer_type == "short" or answer_type == "短答案":
+            if "error output" in actual_answer:
+                em_score = 0
+                recall_score = 0
+            else:
+                em_score = 1 if expected_answer.strip() == actual_answer.strip() else 0
+                recall_score = calculate_recall(expected_answer, actual_answer)
+
+        # Long Answer Evaluation (Rouge & LLM Judge)
+        if "error output" in actual_answer:
+            rouge_score = 0
+            model_eval = 0
+        else:
+            rouge_score = calculate_rouge(expected_answer, actual_answer)
+
+            # LLM Judge (Model Eval)
+            if eval_client:
+                evaluation_prompt = (
+                    f"Question: {query_text}\n"
+                    f"Ground_truth: {expected_answer}\n"
+                    f"Model_answer: {actual_answer}\n"
+                    f"Is the model answer correct? You only need to output 'true' for correct or 'false' for incorrect. "
+                    f"If the model answer does not contain any information, it should be judged as 'false'."
+                )
+                try:
+                    # chat_completion = eval_client.chat.completions.create(
+                    #     model="gpt-4o",  # Use a strong model for evaluation
+                    #     messages=[{"role": "user", "content": evaluation_prompt}]
+                    # )
+                    # response_core = chat_completion.choices[0].message.content.strip()
+                    response_core = eval_client(evaluation_prompt)
+                    model_eval = 1 if "true" in response_core.lower() else 0
+                except Exception as e:
+                    print(f"Error during model eval for QID {sample.qid}: {e}")
+                    model_eval = 0
+
+        return {
+            "em_score": em_score,
+            "recall_score": recall_score,
+            "rouge_score": rouge_score,
+            "model_eval": model_eval
+        }
+
+    def _check_images_entailment(self, elements: List[PageElement], answer: str, eval_client) -> bool:
+        """
+        基于 finragbench_eval_citation.py 的逻辑检查图片证据是否蕴含答案。
+        """
+        if not elements or not eval_client:
+            return False
+
+        usr_msg = [
+            {"type": "text", "text": f"Answer: {answer}"},
+            {"type": "text", "text": "Please judge whether these pages cover the answer, your answer can only be 'yes' or 'no'. Only generate one response for each input group, do not output any explanation."},
+            {"type": "text", "text": "Here is my file page:"}
+        ]
+
+        # 添加图片证据
+        valid_images = 0
+        for el in elements:
+            if el.crop_path and os.path.exists(el.crop_path):
+                encoded_image = encode_image_to_base64(el.crop_path)
+                if encoded_image:
+                    usr_msg.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{encoded_image}", "detail": "auto"}
+                    })
+                    valid_images += 1
+        
+        if valid_images == 0:
+            return False
+
+        attempt, max_retries, retry_delay = 0, 3, 5
+        while attempt < max_retries:
+            try:
+                # chat_completion = eval_client.chat.completions.create(
+                #     model="gpt-4o",
+                #     messages=[{"role": "user", "content": usr_msg}]
+                # )
+                # response_core = chat_completion.choices[0].message.content.strip()
+                response_core = eval_client(usr_msg)
+                return "yes" in response_core.lower()
+            except Exception as e:
+                attempt += 1
+                print(f"Error calling model for entailment: {e}. Retry {attempt}/{max_retries}.")
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                else:
+                    return False
+        return False
+
+    def evaluate(self, eval_client=None) -> Dict[str, float]:
+        """
+        执行完整的评估流程，包含 Answer Correctness 和 Citation Entailment。
+        
+        :param eval_client: 用于评估的 OpenAI 兼容客户端 (推荐 GPT-4o)
+        :return: 汇总指标字典
+        """
+        total_metrics = {
+            "em_score": 0, "recall_score": 0, 
+            "rouge_score": 0, "model_eval": 0,
+            "entailment_recall": 0, "entailment_precision": 0
+        }
+        counts = {
+            "short": 0, "long": 0, "total": 0, "citation": 0
+        }
+
+        print(f"Starting Evaluation on {len(self.samples)} samples...")
+        
+        for sample in tqdm(self.samples, desc="Evaluating"):
+            if sample.extra_info is None:
+                sample.extra_info = {}
+            
+            # 1. Evaluate Answer Correctness
+            corr_metrics = self._evaluate_answer_correctness(sample, eval_client)
+            sample.extra_info['correctness_metrics'] = corr_metrics
+            
+            # Aggregate Correctness Metrics
+            answer_type = sample.extra_info.get('answer_type', 'short')
+            if answer_type == 'short' or answer_type == '短答案':
+                total_metrics['em_score'] += corr_metrics['em_score']
+                total_metrics['recall_score'] += corr_metrics['recall_score']
+                counts['short'] += 1
+            else:
+                total_metrics['rouge_score'] += corr_metrics['rouge_score']
+                total_metrics['model_eval'] += corr_metrics['model_eval']
+                counts['long'] += 1
+            
+            counts['total'] += 1
+
+            # 2. Evaluate Citation Entailment (Requires LLM Client)
+            if eval_client:
+                # 获取 RAG 过程中检索到的 Elements (通常存储在 retrieved_elements 或由 pipeline 生成)
+                # 这里假设 pipeline 运行后结果存储在 'retrieved_elements' 中，或者是手动调用 pipeline
+                # 为了通用性，这里只检查 extra_info 中是否已经有了 evidence elements
+                
+                # 如果是运行过 pipeline，extra_info 应该包含检索结果
+                # 如果没有，跳过引用评估
+                retrieved_elements = sample.extra_info.get('retrieved_elements', [])
+                # 转换回 PageElement 对象列表 (如果被序列化为 dict)
+                elements_obj = []
+                for el in retrieved_elements:
+                    if isinstance(el, dict):
+                         # 简单的 dict 转 obj
+                         pe = PageElement(**{k:v for k,v in el.items() if k in PageElement.__annotations__})
+                         elements_obj.append(pe)
+                    elif isinstance(el, PageElement):
+                         elements_obj.append(el)
+                
+                final_answer = sample.extra_info.get('final_answer', "")
+                
+                if elements_obj and final_answer:
+                    # 计算 Recall: 是否所有检索图片作为一个整体蕴含了答案
+                    entailment_recall_bool = self._check_images_entailment(elements_obj, final_answer, eval_client)
+                    entailment_recall = 1 if entailment_recall_bool else 0
+                    
+                    # 计算 Precision: 如果 Recall 为 1，检查每张图片是否必要 (Leave-One-Out)
+                    entailment_precision = 0
+                    if entailment_recall == 1:
+                        precision_scores = []
+                        if len(elements_obj) == 1:
+                            entailment_precision = 1
+                        else:
+                            # 简化版 Precision 计算 (参考 eval_citation.py)
+                            # 逐个检查图片是否能支持答案
+                            for i, img_el in enumerate(elements_obj):
+                                single_cover = self._check_images_entailment([img_el], final_answer, eval_client)
+                                precision_scores.append(1 if single_cover else 0)
+                            
+                            if precision_scores:
+                                entailment_precision = sum(precision_scores) / len(precision_scores)
+                    
+                    total_metrics['entailment_recall'] += entailment_recall
+                    total_metrics['entailment_precision'] += entailment_precision
+                    counts['citation'] += 1
+                    
+                    sample.extra_info['citation_metrics'] = {
+                        "entailment_recall": entailment_recall,
+                        "entailment_precision": entailment_precision
+                    }
+
+        # Calculate Averages
+        avg_results = {}
+        if counts['short'] > 0:
+            avg_results['avg_em'] = total_metrics['em_score'] / counts['short']
+            avg_results['avg_recall'] = total_metrics['recall_score'] / counts['short']
+        
+        if counts['long'] > 0:
+            avg_results['avg_rouge'] = total_metrics['rouge_score'] / counts['long']
+            avg_results['avg_model_eval'] = total_metrics['model_eval'] / counts['long']
+            
+        if counts['citation'] > 0:
+            avg_results['avg_entailment_recall'] = total_metrics['entailment_recall'] / counts['citation']
+            avg_results['avg_entailment_precision'] = total_metrics['entailment_precision'] / counts['citation']
+
+        print(f"Evaluation Results: {avg_results}")
+        return avg_results
 
 if __name__ == "__main__":
     # 配置路径
@@ -581,20 +703,14 @@ if __name__ == "__main__":
     
     # 模拟工具和 Extractor 的初始化参数
     from src.agents.utils import ImageZoomOCRTool
-    # 假设有一个工作目录
     tool_work_dir = "./workspace" 
     
     print("Initializing Models...")
     embedder = Qwen3VLEmbedder(model_name_or_path=embedding_model_path, torch_dtype=torch.float16)
     reranker = Qwen3VLReranker(model_name_or_path=reranker_model_path, torch_dtype=torch.float16)
     
-    # 初始化 Extractor (需要真实可用的 API Key 和 URL)
-    # 这里仅为示例代码，实际运行时需替换为有效配置
     tool = ImageZoomOCRTool(work_dir=tool_work_dir)
     extractor = ElementExtractor(
-        # base_url="http://localhost:3888/v1",
-        # api_key="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR",
-        # model_name="qwen3-vl-plus",
         base_url="http://localhost:8001/v1",
         api_key="sk-123456",
         model_name="MinerU-Agent-CK300",
@@ -606,19 +722,21 @@ if __name__ == "__main__":
         lang="bbox", 
         embedding_model=embedder, 
         rerank_model=reranker,
-        extractor=extractor # 传入 extractor
+        extractor=extractor
     )
     
     loader.load_data()
     
-    # 建立索引 (如果不存在)
+    # 建立索引
     loader.build_page_vector_pool(batch_size=16)
     
     if len(loader.samples) > 0:
-        test_query = loader.samples[1].query
-        print(f"\nTesting Query: {test_query}")
-        # 运行 pipeline
-        results = loader.pipeline(test_query, top_k=10) # 仅测试 Top 2 以节省时间
-        print(f"\nFinal Elements Retrieved ({len(results)}):")
-        for res in results:
-            print(f" - Content: {res.content} \n - Crop: {res.crop_path}")
+        test_sample = loader.samples[0]
+        print(f"\nTesting Query: {test_sample.query}")
+        
+        # 运行 pipeline 并保存结果到 extra_info
+        results = loader.pipeline(test_sample.query, image_paths=[test_sample.data_source], top_k=2) 
+        test_sample.extra_info['final_answer'] = "Generated Answer Here..." # 模拟生成答案
+        test_sample.extra_info['retrieved_elements'] = results
+        
+        loader.evaluate(eval_client=create_llm_caller())
