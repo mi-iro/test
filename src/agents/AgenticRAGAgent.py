@@ -4,7 +4,9 @@ import json
 import re
 import base64
 import mimetypes
+import pandas as pd
 from typing import List, Dict, Any, Optional, Union, Tuple
+from dataclasses import asdict
 
 # 假设文件结构，确保可以导入 src 下的模块
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -75,6 +77,7 @@ class AgenticRAGAgent(RAGAgent):
     """
     基于 ReAct 范式的 Agentic RAG。
     继承自 RAGAgent 以保持接口兼容，但重写了 process_sample 逻辑以引入 LLM 驱动的循环。
+    包含缓存机制以支持推理与评估分离。
     """
 
     def __init__(
@@ -83,7 +86,8 @@ class AgenticRAGAgent(RAGAgent):
         base_url: str, 
         api_key: str, 
         model_name: str, 
-        max_rounds: int
+        max_rounds: int,
+        cache_dir: str = "./cache_results"  # 新增缓存目录参数
     ):
         """
         :param loader: 数据集加载器 (FinRAGLoader, MMLongLoader 等)，用于提供 pipeline 作为检索工具。
@@ -91,11 +95,16 @@ class AgenticRAGAgent(RAGAgent):
         :param api_key: LLM API Key。
         :param model_name: 模型名称。
         :param max_rounds: 最大交互/思考轮数，防止死循环。
+        :param cache_dir: 结果缓存目录，用于持久化存储推理结果。
         """
         super().__init__(loader)
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model_name = model_name
         self.max_rounds = max_rounds
+        self.cache_dir = cache_dir
+        
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
 
     def extract_tool_call(self, text: str) -> Optional[Dict]:
         """从文本中提取 JSON 格式的工具调用"""
@@ -126,7 +135,11 @@ class AgenticRAGAgent(RAGAgent):
                 
                 if not elements:
                     return "No relevant evidence found."
-                sample.extra_info['retrieved_elements'] = sample.extra_info.get('retrieved_elements',[]) + elements
+                
+                # 更新 retrieved_elements
+                current_elements = sample.extra_info.get('retrieved_elements', [])
+                # 避免重复添加 (简单逻辑)
+                sample.extra_info['retrieved_elements'] = current_elements + elements
                 
                 # 构造多模态 Tool Response
                 content_list = []
@@ -222,23 +235,124 @@ class AgenticRAGAgent(RAGAgent):
 
     def process_sample(self, sample: StandardSample) -> StandardSample:
         """
-        重写父类方法。
-        不再直接调用 loader.pipeline，而是启动 ReAct Agent Loop。
+        处理样本。
+        1. 检查缓存：如果存在缓存结果，直接读取并跳过推理。
+        2. 如果无缓存：执行 ReAct Agent Loop，并将结果写入缓存。
         """
-        
-        print(f"Processing Sample {sample.qid} with Agentic Logic...")
-
-        final_answer, history_messages = self.run_agent_loop(sample)
-
-        # 记录结果
         if sample.extra_info is None:
             sample.extra_info = {}
+
+        cache_file = os.path.join(self.cache_dir, f"{sample.qid}.json")
         
-        # 记录完整的对话历史，包含多模态证据
+        # --- 1. 尝试从缓存加载 ---
+        if os.path.exists(cache_file):
+            print(f"Loading cached result for Sample {sample.qid}...")
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                
+                # 恢复核心字段
+                sample.extra_info['final_answer'] = cached_data.get('final_answer', "")
+                sample.extra_info['messages'] = cached_data.get('messages', [])
+                
+                # 恢复 retrieved_elements 对象列表
+                elements_dicts = cached_data.get('retrieved_elements', [])
+                restored_elements = []
+                for el_dict in elements_dicts:
+                    # 过滤掉非 PageElement 字段以防止报错
+                    valid_keys = PageElement.__annotations__.keys()
+                    filtered_dict = {k: v for k, v in el_dict.items() if k in valid_keys}
+                    restored_elements.append(PageElement(**filtered_dict))
+                
+                sample.extra_info['retrieved_elements'] = restored_elements
+                return sample
+            except Exception as e:
+                print(f"Error loading cache for {sample.qid}, rerunning inference. Error: {e}")
+
+        # --- 2. 执行推理 ---
+        print(f"Processing Sample {sample.qid} with Agentic Logic (Inference)...")
+        final_answer, history_messages = self.run_agent_loop(sample)
+
+        # 记录结果到 extra_info
         sample.extra_info['messages'] = history_messages
         sample.extra_info['final_answer'] = final_answer
         
+        # --- 3. 写入缓存 ---
+        try:
+            # 准备序列化 retrieved_elements
+            elements_to_save = []
+            if 'retrieved_elements' in sample.extra_info:
+                for el in sample.extra_info['retrieved_elements']:
+                    if hasattr(el, 'to_dict'):
+                        elements_to_save.append(el.to_dict())
+                    elif isinstance(el, dict):
+                         elements_to_save.append(el)
+
+            cache_data = {
+                "qid": sample.qid,
+                "query": sample.query,
+                "final_answer": final_answer,
+                "messages": history_messages, # 包含多模态信息，JSON序列化时注意 image_url 字段比较大
+                "retrieved_elements": elements_to_save
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            print(f"Saved result for Sample {sample.qid} to cache.")
+            
+        except Exception as e:
+            print(f"Error saving cache for {sample.qid}: {e}")
+        
         return sample
+
+    def save_results(self, excel_path: str = "agent_results_summary.xlsx", json_path: str = "agent_results_summary.json"):
+        """
+        汇总所有样本的处理结果，并分别保存为 Excel 和 JSON 文件。
+        """
+        if not self.loader.samples:
+            print("No samples to save.")
+            return
+
+        data_rows = []
+        for sample in self.loader.samples:
+            final_ans = sample.extra_info.get('final_answer', "") if sample.extra_info else ""
+            elements_to_save = []
+            if 'retrieved_elements' in sample.extra_info:
+                for el in sample.extra_info['retrieved_elements']:
+                    if hasattr(el, 'to_dict'):
+                        elements_to_save.append(el.to_dict())
+                    elif isinstance(el, dict):
+                         elements_to_save.append(el)
+                         
+            row = {
+                "QID": sample.qid,
+                "Query": sample.query,
+                "Gold Answer": sample.gold_answer,
+                "Model Answer": final_ans,
+                "Retrieved Elements": json.dumps(elements_to_save),
+                "Data Source": sample.data_source
+            }
+            data_rows.append(row)
+
+        # --- 保存为 Excel ---
+        if excel_path:
+            try:
+                df = pd.DataFrame(data_rows)
+                df.to_excel(excel_path, index=False)
+                print(f"\n✅ Excel summary saved to: {excel_path}")
+            except ImportError:
+                print("Error: pandas or openpyxl not installed. Cannot save to Excel.")
+            except Exception as e:
+                print(f"Error saving Excel: {e}")
+
+        # --- 保存为 JSON ---
+        if json_path:
+            try:
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(data_rows, f, ensure_ascii=False, indent=2)
+                print(f"✅ JSON summary saved to: {json_path}")
+            except Exception as e:
+                print(f"Error saving JSON: {e}")
 
 # --- 测试代码 ---
 if __name__ == "__main__":
@@ -247,10 +361,16 @@ if __name__ == "__main__":
     from src.agents.utils import ImageZoomOCRTool
     
     # 1. 模拟环境配置
+    # 请确保修改为你本地的正确路径
     root_dir = "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/MMLongBench-Doc"
     tool_work_dir = "./workspace"
     
-    # 2. 初始化底层提取器 (Loader 内部需要用到的)
+    # 定义缓存和结果输出路径
+    cache_dir = "./workspace/cache_mmlong"
+    output_excel = None
+    output_json = "./workspace/mmlong_results.json"
+
+    # 2. 初始化底层提取器
     tool = ImageZoomOCRTool(work_dir=tool_work_dir)
     extractor = ElementExtractor(
         base_url="http://localhost:8001/v1",
@@ -260,22 +380,31 @@ if __name__ == "__main__":
     )
     
     # 3. 初始化 Loader
-    loader = MMLongLoader(data_root=root_dir, extractor=extractor)
-    loader.load_data()
+    # 仅加载部分数据用于测试
+    if os.path.exists(root_dir):
+        loader = MMLongLoader(data_root=root_dir, extractor=extractor)
+        loader.load_data()
+        
+        # 截取前 5 个样本进行测试
+        loader.samples = loader.samples[:5] 
 
-    # 4. 初始化 Agentic RAG Agent
-    agent = AgenticRAGAgent(
-        loader=loader,
-        base_url="http://localhost:3888/v1", 
-        model_name="qwen3-max",
-        api_key="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR",
-        max_rounds=5
-    )
-    
-    # 5. 运行单条测试
-    if len(loader.samples) > 0:
-        result_sample = agent.process_sample(loader.samples[0])
-        print("\n=== Final Result ===")
-        print(f"Query: {result_sample.query}")
-        print(f"Answer: {result_sample.extra_info['final_answer']}")
-        print(f"History Steps: {len(result_sample.extra_info['messages'])}")
+        # 4. 初始化 Agentic RAG Agent (带缓存)
+        agent = AgenticRAGAgent(
+            loader=loader,
+            base_url="http://localhost:3888/v1", 
+            model_name="qwen3-max",
+            api_key="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR",
+            max_rounds=5,
+            cache_dir=cache_dir
+        )
+        
+        # 5. 批量处理
+        print(f"\n🚀 Starting Batch Processing on {len(loader.samples)} samples...")
+        for sample in loader.samples:
+            agent.process_sample(sample)
+        
+        # 6. 汇总结果
+        agent.save_results(excel_path=output_excel, json_path=output_json)
+        
+    else:
+        print(f"Data root {root_dir} does not exist. Skipping test.")
