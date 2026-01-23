@@ -3,8 +3,9 @@ import json
 import re
 import string
 import collections
+import math
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Union, Dict, Any, Tuple
 
 @dataclass
 class PageElement:
@@ -53,6 +54,47 @@ class StandardSample:
         """序列化为字典，方便写入日志"""
         return asdict(self)
 
+# --- Metrics Calculation Helpers (Ported from eval.py) ---
+
+def calculate_area(bbox: List[int]) -> int:
+    """计算 BBox 面积"""
+    w = max(0, bbox[2] - bbox[0])
+    h = max(0, bbox[3] - bbox[1])
+    return w * h
+
+def get_intersection_area(bbox1: List[int], bbox2: List[int]) -> int:
+    """计算两个 BBox 的交集面积"""
+    x1 = max(bbox1[0], bbox2[0])
+    y1 = max(bbox1[1], bbox2[1])
+    x2 = min(bbox1[2], bbox2[2])
+    y2 = min(bbox1[3], bbox2[3])
+    if x2 < x1 or y2 < y1: return 0
+    return (x2 - x1) * (y2 - y1)
+
+def calc_iou_min(pred: List[int], gt: List[int]) -> float:
+    """计算 Intersection over Minimum Area (适合包含关系检测)"""
+    area_p = calculate_area(pred)
+    area_g = calculate_area(gt)
+    if area_p == 0 or area_g == 0: return 0.0
+    inter = get_intersection_area(pred, gt)
+    return inter / min(area_p, area_g)
+
+def calc_iou_standard(pred: List[int], gt: List[int]) -> float:
+    """计算标准的 Intersection over Union"""
+    area_p = calculate_area(pred)
+    area_g = calculate_area(gt)
+    if area_p == 0 or area_g == 0: return 0.0
+    inter = get_intersection_area(pred, gt)
+    union = area_p + area_g - inter
+    return inter / union if union > 0 else 0.0
+
+def calculate_f_beta(precision: float, recall: float, beta: float = 1.0) -> float:
+    """计算 F-beta 分数"""
+    if precision + recall == 0: return 0.0
+    beta_sq = beta ** 2
+    return (1 + beta_sq) * (precision * recall) / ((beta_sq * precision) + recall)
+
+
 class BaseDataLoader(abc.ABC):
     """
     所有数据集 Loader 的抽象基类。
@@ -86,80 +128,13 @@ class BaseDataLoader(abc.ABC):
         根据查询检索页面元素。
         """
         raise NotImplementedError
-
+    
     def evaluate(self) -> Dict[str, float]:
         """
-        执行评估：计算 QA 指标、页面检索指标和元素提取指标。
-        评估结果将存储在每个 sample.extra_info['metrics'] 中。
-        依赖 sample.extra_info 包含 'final_answer' 和可选的 'retrieved_elements'。
-        
-        Returns:
-            Dict[str, float]: 整个数据集的平均指标 (avg_qa_f1, avg_qa_em, avg_page_recall, avg_element_iou 等)
+        执行评估
         """
-        total_metrics = collections.defaultdict(float)
-        counts = collections.defaultdict(int)
-
-        for sample in self.samples:
-            if sample.extra_info is None:
-                sample.extra_info = {}
-
-            # --- 获取预测结果 ---
-            pred_answer = sample.extra_info.get('final_answer', "")
-            
-            # 尝试获取预测的 elements (兼容 dict 列表或 PageElement 对象列表)
-            raw_elements = sample.extra_info.get('retrieved_elements', [])
-            pred_elements = []
-            for el in raw_elements:
-                if isinstance(el, dict):
-                    pred_elements.append(PageElement(**{k:v for k,v in el.items() if k in PageElement.__annotations__}))
-                elif isinstance(el, PageElement):
-                    pred_elements.append(el)
-            
-            metrics_result = {}
-
-            # 1. 计算 QA 指标 (Text Generation)
-            if sample.gold_answer:
-                qa_score = self._compute_qa_metrics(pred_answer, sample.gold_answer)
-                metrics_result['qa'] = qa_score
-                total_metrics['qa_f1'] += qa_score['f1']
-                total_metrics['qa_em'] += qa_score['em']
-                counts['qa'] += 1
-
-            # 2. 计算 页面检索 指标 (Page Retrieval)
-            # 仅当有 gold_pages 真值时计算
-            if sample.gold_pages:
-                page_score = self._compute_page_metrics(pred_elements, sample.gold_pages)
-                metrics_result['page'] = page_score
-                total_metrics['page_recall'] += page_score['recall']
-                total_metrics['page_precision'] += page_score['precision']
-                counts['page'] += 1
-
-            # 3. 计算 元素提取 指标 (Element Extraction / BBox IoU)
-            # 仅当有 gold_elements 真值时计算
-            if sample.gold_elements:
-                elem_score = self._compute_element_metrics(pred_elements, sample.gold_elements)
-                metrics_result['element'] = elem_score
-                total_metrics['element_iou'] += elem_score['mean_iou']
-                counts['element'] += 1
-
-            # 存储回 sample
-            sample.extra_info['metrics'] = metrics_result
-
-        # --- 汇总平均值 ---
-        avg_results = {}
-        if counts['qa'] > 0:
-            avg_results['avg_qa_f1'] = total_metrics['qa_f1'] / counts['qa']
-            avg_results['avg_qa_em'] = total_metrics['qa_em'] / counts['qa']
+        raise NotImplementedError
         
-        if counts['page'] > 0:
-            avg_results['avg_page_recall'] = total_metrics['page_recall'] / counts['page']
-            avg_results['avg_page_precision'] = total_metrics['page_precision'] / counts['page']
-            
-        if counts['element'] > 0:
-            avg_results['avg_element_iou'] = total_metrics['element_iou'] / counts['element']
-
-        return avg_results
-
     # --- 内部评估辅助函数 ---
 
     def _normalize_text(self, s: str) -> str:
@@ -210,7 +185,7 @@ class BaseDataLoader(abc.ABC):
         gt_page_ids = set(gold_pages)
         
         if not gt_page_ids:
-            return {"recall": 0.0, "precision": 0.0}
+            return {"recall": 1.0, "precision": 1.0 if len(pred_page_ids) == 0 else 0.0}
         
         hits = pred_page_ids & gt_page_ids
         recall = len(hits) / len(gt_page_ids)
@@ -218,59 +193,53 @@ class BaseDataLoader(abc.ABC):
         
         return {"recall": recall, "precision": precision}
 
-    def _compute_iou(self, box1: List[int], box2: List[int]) -> float:
-        """计算两个 BBox [x1, y1, x2, y2] 的 IoU"""
-        # 确保 box 格式正确
-        if len(box1) != 4 or len(box2) != 4:
-            return 0.0
-            
-        x_left = max(box1[0], box2[0])
-        y_top = max(box1[1], box2[1])
-        x_right = min(box1[2], box2[2])
-        y_bottom = min(box1[3], box2[3])
-
-        if x_right < x_left or y_bottom < y_top:
-            return 0.0
-
-        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        
-        union_area = box1_area + box2_area - intersection_area
-        
-        if union_area <= 0:
-            return 0.0
-            
-        return intersection_area / union_area
-
-    def _compute_element_metrics(self, pred_elements: List[PageElement], gold_elements: List[PageElement]) -> Dict[str, float]:
+    def _compute_page_accuracy(self, pred_bboxes: List[List[int]], gt_bboxes: List[List[int]]) -> float:
         """
-        计算元素级别的 IoU。
-        逻辑：对于每个 GT BBox，找到预测中 IoU 最大的 BBox，计算这些 Max IoU 的平均值 (Recall-oriented IoU)。
+        计算 Page Accuracy:
+        衡量页面级别的存在性预测是否正确（有无 GT vs 有无 Pred）。
+        逻辑同 eval.py:
+        - 如果都没有: Correct (1.0)
+        - 如果都有: Correct (1.0) - 此处定义较宽松，只要预测了且GT存在就算“命中”任务类型，具体质量由IoU衡量
+        - 只有一个有: Incorrect (0.0)
         """
-        if not gold_elements:
-            return {"mean_iou": 0.0}
-            
-        total_max_iou = 0.0
+        if not pred_bboxes and not gt_bboxes:
+            return 1.0
+        elif not pred_bboxes and gt_bboxes:
+            return 0.0
+        elif not gt_bboxes and pred_bboxes:
+            return 0.0
+        else:
+            return 1.0
+
+    def _compute_detection_metrics(self, pred_bboxes: List[List[int]], gt_bboxes: List[List[int]], 
+                                 iou_func, threshold: float) -> Tuple[float, float]:
+        """
+        计算基于特定 IoU 函数和阈值的 Precision 和 Recall。
+        """
+        if not pred_bboxes and not gt_bboxes: return 1.0, 1.0
+        if not pred_bboxes: return 1.0, 0.0 
+        if not gt_bboxes: return 0.0, 1.0   
+
+        # Precision Calculation
+        valid_preds = 0
+        for p in pred_bboxes:
+            hit = False
+            for g in gt_bboxes:
+                if iou_func(p, g) > threshold:
+                    hit = True
+                    break
+            if hit: valid_preds += 1
+        precision = valid_preds / len(pred_bboxes)
+
+        # Recall Calculation
+        hit_gts = 0
+        for g in gt_bboxes:
+            hit = False
+            for p in pred_bboxes:
+                if iou_func(p, g) > threshold:
+                    hit = True
+                    break
+            if hit: hit_gts += 1
+        recall = hit_gts / len(gt_bboxes)
         
-        for gt in gold_elements:
-            gt_bbox = gt.bbox
-            if not gt_bbox or len(gt_bbox) != 4:
-                continue
-                
-            max_iou_for_this_gt = 0.0
-            for pred in pred_elements:
-                pred_bbox = pred.bbox
-                # 必须在同一页才计算 IoU
-                if pred.corpus_id != gt.corpus_id:
-                    continue
-                    
-                iou = self._compute_iou(gt_bbox, pred_bbox)
-                if iou > max_iou_for_this_gt:
-                    max_iou_for_this_gt = iou
-            
-            total_max_iou += max_iou_for_this_gt
-            
-        mean_iou = total_max_iou / len(gold_elements)
-        return {"mean_iou": mean_iou}
+        return precision, recall
