@@ -108,7 +108,7 @@ class AgenticRAGAgent(RAGAgent):
             print(f"Error parsing tool call JSON: {match.group(1)}")
             return None
 
-    def _execute_tool(self, tool_name: str, args: Dict) -> Union[str, List[Dict[str, Any]]]:
+    def _execute_tool(self, tool_name: str, args: Dict, sample: StandardSample) -> Union[str, List[Dict[str, Any]]]:
         """
         执行工具调用。
         将检索到的 PageElement 转换为多模态消息内容 (List[Dict])。
@@ -122,14 +122,11 @@ class AgenticRAGAgent(RAGAgent):
             print(f"  [Agent Action] Searching for: {query}")
             
             try:
-                image_paths = None
-                if hasattr(self, 'current_data_source') and self.current_data_source:
-                    image_paths = [self.current_data_source]
-
-                elements = self.loader.pipeline(query=query, image_paths=image_paths, top_k=10)
+                elements = self.loader.pipeline(query=query, image_paths=[sample.data_source], top_k=10)
                 
                 if not elements:
                     return "No relevant evidence found."
+                sample.extra_info['retrieved_elements'] = sample.extra_info.get('retrieved_elements',[]) + elements
                 
                 # 构造多模态 Tool Response
                 content_list = []
@@ -165,14 +162,14 @@ class AgenticRAGAgent(RAGAgent):
         else:
             return f"Error: Unknown tool '{tool_name}'."
 
-    def run_agent_loop(self, query: str) -> Tuple[str, List[Dict]]:
+    def run_agent_loop(self, sample: StandardSample) -> Tuple[str, List[Dict]]:
         """
         执行 ReAct 循环的核心异步方法。
         返回: (final_answer, full_messages_history)
         """
         messages = [
             {"role": "system", "content": AGENTIC_SYSTEM_PROMPT},
-            {"role": "user", "content": query}
+            {"role": "user", "content": sample.query}
         ]
 
         final_answer = ""
@@ -202,7 +199,7 @@ class AgenticRAGAgent(RAGAgent):
                 tool_name = tool_call_dict.get("name")
                 tool_args = tool_call_dict.get("arguments", {})
                 
-                tool_result = self._execute_tool(tool_name, tool_args)
+                tool_result = self._execute_tool(tool_name, tool_args, sample)
                 
                 # 4. 构造 Tool Response
                 if isinstance(tool_result, list):
@@ -228,14 +225,10 @@ class AgenticRAGAgent(RAGAgent):
         重写父类方法。
         不再直接调用 loader.pipeline，而是启动 ReAct Agent Loop。
         """
-        query = sample.query
-        
-        # 设置当前上下文的数据源，供 _execute_tool 使用
-        self.current_data_source = sample.data_source
         
         print(f"Processing Sample {sample.qid} with Agentic Logic...")
 
-        final_answer, history_messages = self.run_agent_loop(query)
+        final_answer, history_messages = self.run_agent_loop(sample)
 
         # 记录结果
         if sample.extra_info is None:
