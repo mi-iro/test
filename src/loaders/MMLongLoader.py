@@ -8,6 +8,8 @@ import uuid
 import torch
 import collections
 import math
+from math import isclose
+from collections import defaultdict
 from typing import List, Dict, Any, Optional, Callable, Union
 
 # Adjust path to ensure we can import from src and scripts
@@ -18,46 +20,213 @@ from src.agents.ElementExtractor import ElementExtractor
 from scripts.qwen3_vl_reranker import Qwen3VLReranker
 from src.utils.llm_helper import create_llm_caller
 
-# --- 新增：引入 Levenshtein 距离计算 ANLS (如果环境中没有 python-Levenshtein，可以使用 difflib 替代) ---
-try:
-    from Levenshtein import distance as levenshtein_distance
-except ImportError:
-    # Fallback implementation if library is missing
-    def levenshtein_distance(s1, s2):
-        if len(s1) < len(s2):
-            return levenshtein_distance(s2, s1)
-        if len(s2) == 0:
-            return len(s1)
-        previous_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            current_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                insertions = previous_row[j + 1] + 1
-                deletions = current_row[j] + 1
-                substitutions = previous_row[j] + (c1 != c2)
-                current_row.append(min(insertions, deletions, substitutions))
-            previous_row = current_row
-        return previous_row[-1]
+# --- Scoring Functions ported from mmlongbench_eval_score.py ---
 
-# --- 新增：MMLongBench-Doc 定义的提取 Prompt (Appendix B.2) ---
-MMLONG_EXTRACT_PROMPT_TEMPLATE = """Given the question and analysis, you are tasked to extract answers with required formats from the free-form analysis.
-Your extracted answers should be one of the following formats: (1) Integer, (2) Float, (3) String and (4) List. 
-If you find the analysis the question can not be answered from the given documents, type "Not answerable". 
-Exception: If the analysis only tells you that it can not read/understand the images or documents type "Fail to answer".
-Please make your response as concise as possible. Also note that your response should be formatted as below:
+def levenshtein_distance(s1, s2):
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+
+    distances = range(len(s1) + 1)
+    for i2, c2 in enumerate(s2):
+        distances_ = [i2 + 1]
+        for i1, c1 in enumerate(s1):
+            if c1 == c2:
+                distances_.append(distances[i1])
+            else:
+                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
+
+
+def anls_compute(groundtruth, prediction, threshold=0.5):
+    dist = levenshtein_distance(groundtruth, prediction)
+    length = max(len(groundtruth.upper()), len(prediction.upper()))
+    value = 0.0 if length == 0 else float(dist) / float(length)
+    anls = 1.0 - value
+    if anls <= threshold:
+        anls = 0.0
+    return anls
+
+
+def is_float_equal(reference, prediction, include_percentage: bool = False, is_close: float = False) -> bool:
+    def get_precision(gt_ans: float) -> int:
+        precision = 3
+        if '.' in str(gt_ans):
+            precision = len(str(gt_ans).split('.')[-1])
+        return precision
+
+    try:
+        reference = float(str(reference).strip().rstrip("%").strip())
+        prediction = float(str(prediction).strip().rstrip("%").strip())
+    except:
+        return False
+
+    if include_percentage:
+        gt_result = [reference / 100, reference, reference * 100]
+    else:
+        gt_result = [reference]
+    for item in gt_result:
+        try:
+            if is_close:
+                if isclose(item, prediction, rel_tol=0.01):
+                    return True
+            precision = max(min(get_precision(prediction), get_precision(item)), 2)
+            if round(prediction, precision) == round(item, precision):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def get_clean_string(s):
+    s = str(s).lower().strip()
+    if s.endswith("mile"):
+        s = s[:-4].strip()
+    if s.endswith("miles"):
+        s = s[:-5].strip()
+    if s.endswith("million"):
+        s = s[:-7].strip()
+    # remove parenthesis
+    s = re.sub(r'\s*\([^)]*\)', '', s).strip()
+    # remove quotes
+    s = re.sub(r"^['\"]|['\"]$", "", s).strip()
+    s = s.strip().lstrip("$").strip()
+    s = s.strip().rstrip("%").strip()
+    return s
+
+
+def is_exact_match(s):
+    flag = False
+    # Website
+    if "https://" in s:
+        flag = True
+    # code file
+    if s.endswith(".py") or s.endswith("ipynb"):
+        flag = True
+    if s.startswith("page"):
+        flag = True
+    # telephone number
+    if re.fullmatch(r'\b\d+(-\d+|\s\d+)?\b', s):
+        flag = True
+    # time
+    if "a.m." in s or "p.m." in s:
+        flag = True
+    # YYYY-MM-DD
+    if re.fullmatch(r'\b\d{4}[-\s]\d{2}[-\s]\d{2}\b', s):
+        flag = True
+    # YYYY-MM
+    if re.fullmatch(r'\b\d{4}[-\s]\d{2}\b', s):
+        flag = True
+    # Email address
+    if re.fullmatch(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', s):
+        flag = True
+    return flag
+
+
+def isfloat(num):
+    try:
+        float(num)
+        return True
+    except ValueError:
+        return False
+
+
+def eval_score(gt, pred, answer_type):
+    # Mapping answer formats from prompt/dataset to logic types
+    if answer_type in ["Int", "Integer"]:
+        try:
+            gt, pred = int(gt), int(float(pred))
+        except:
+            pred = ""
+        score = (gt == pred)
+    elif answer_type == "Float":
+        try:
+            gt = float(get_clean_string(str(gt)))
+            pred = float(get_clean_string(str(pred)))
+        except:
+            pred = ""
+        score = is_float_equal(gt, pred, include_percentage=True, is_close=True)
+    elif answer_type in ["Str", "String", "None", "Not answerable", "Fail to answer"]:
+        gt = get_clean_string(gt)
+        pred = get_clean_string(pred)
+        if is_exact_match(gt):
+            score = (gt == pred)
+        else:
+            score = anls_compute(gt, pred)
+    else:
+        # List handling
+        if isinstance(gt, str) and gt.startswith("["):
+            try: gt = eval(gt)
+            except: pass
+        if not isinstance(gt, list):
+            gt = [gt]
+        
+        if isinstance(pred, str) and pred.startswith("["):
+            try: pred = eval(pred)
+            except: pass
+        if not isinstance(pred, list):
+            pred = [pred]
+            
+        # print(len(gt), len(pred))
+        if len(gt) != len(pred):
+            score = 0.0
+        else:
+            gt = sorted([get_clean_string(a) for a in gt])
+            pred = sorted([get_clean_string(a) for a in pred])
+            # print(gt, pred)
+            if len(gt) > 0 and (isfloat(gt[0]) or is_exact_match(gt[0])):
+                score = ("-".join(gt) == "-".join(pred))
+            else:
+                if len(gt) == 0:
+                    score = 1.0 # Both empty
+                else:
+                    score = min([anls_compute(gt_v, pred_v) for gt_v, pred_v in zip(gt, pred)])
+
+    return float(score)
+
+# --- Updated Prompt Template from mmlongbench_prompt_for_answer_extraction.md ---
+MMLONG_EXTRACT_PROMPT_TEMPLATE = """Given the question and analysis, you are tasked to extract answers with required formats from the free-form analysis. 
+- Your extracted answers should be one of the following formats: (1) Integer, (2) Float, (3) String and (4) List. If you find the analysis the question can not be answered from the given documents, type "Not answerable". Exception: If the analysis only tells you that it can not read/understand the images or documents, type "Fail to answer".
+- Please make your response as concise as possible. Also note that your response should be formatted as below:
+
+```
 
 Extracted answer: [answer]
 Answer format: [answer format]
 
-Here is the example:
+```
+
+Please read the following example, then extract the answer from the model response and type it at the end of the prompt. 
+
+---
 Question: List the primary questions asked about the services in this report.
-Analysis: The primary questions asked about the services in the report for The Limes Residential Home are: 1. Is the service safe? 2. Is the service effective? 3. Is the service caring? 4. Is the service responsive? 5. Is the service well-led?
-Extracted answer: ['Is the service safe?', 'Is the service effective?', 'Is the service caring?', 'Is the service responsive?', 'Is the service well-led?']
+Analysis:  The primary questions asked about the services in the report for The Limes Residential Home are:\\n\\n1. Is the service safe?\\n2. Is the service effective?\\n3. Is the service caring?\\n4. Is the service responsive?\\n5. Is the service well-led?
+Extracted answer: ['Is the servife safe?', 'Is the service effective', 'Is the serve caring?', 'Is the service responsive?', 'Is the service well-led?']
 Answer format: List
 
-Question: [question]
-Analysis: [analysis]
+---
+Question: How many regulations of the HSCA 2008 are breached in all according to this report?
+Analysis: According to the report, the provider breached 10 Health and Social Care Act 2008 (Regulated Activities) Regulations in total. Here are the specifics:\\n\\n1. Regulation 13: Safeguarding service users from abuse and improper treatment\\n2. Regulation 12: Safe care and treatment\\n3. Regulation 18: Staffing\\n4. Regulation 11: Need for consent\\n5. Regulation 10: Dignity and respect\\n6. Regulation 9: Person-centred care\\n7. Regulation 17: Good governance\\n8. Regulation 18 (CQC Registration Regulations 2009): Notification of other incidents\\n9. Regulation 18: Failure to maintain an accurate and up-to-date care plan\\n10. Regulation 11: Failure to implement the Mental Capacity Act 2005 code of practice effectively\\n\\nThese breaches involve issues concerning staffing, safeguarding, medicines management, dignity and respect, consent, care planning, governance, and failure to notify the CQC of incidents.
+Extracted answer: 10
+Answer format: Integer
+
+---
+Question: According to the survey that is the percentage of Chinese who are paying more or about the same attention to politics after Trump's election?
+Analysis: The survey provided does not specify the percentage of Chinese individuals specifically who are paying more or about the same attention to politics after Trump's election. The report focuses primarily on American demographics and does not include specific details about the Chinese population in relation to this question. If you need information about a different demographic or a summary of the findings from the American demographic, I can certainly help with that!
+Extracted answer: Not answerable
+Answer format: String
+
+---
+Question: How many quotations from male respondent over 50 years old are included in this report?
+Analysis: The image you've provided appears to be a screenshot of a document with multiple charts. However, the text is too small and blurry to read accurately. If you can provide a clearer image or more context, I might be able to help you with your question.
+Extracted answer: Fail to answer
+Answer format: String
+
+---
+Question: {question}
+Analysis: {analysis}
 """
+
 
 class MMLongLoader(BaseDataLoader):
     """
@@ -76,11 +245,8 @@ class MMLongLoader(BaseDataLoader):
         self.doc_dir = os.path.join(data_root, "data", "documents")
         self.llm_caller = None
 
-    # ... [原有 get_reranker, _parse_assistant_content 等方法保持不变] ...
-    
     @classmethod
     def get_reranker(cls, model_path: str):
-        # (保持原有代码不变)
         if cls._reranker_instance is None:
             if not model_path or not os.path.exists(model_path):
                 print(f"Warning: Reranker model path is invalid: {model_path}")
@@ -98,7 +264,6 @@ class MMLongLoader(BaseDataLoader):
         return cls._reranker_instance
 
     def _parse_assistant_content(self, content: str) -> Dict[str, Any]:
-        # (保持原有代码不变)
         try:
             match = re.search(r'```json(.*?)```', content, re.DOTALL)
             if match:
@@ -109,16 +274,15 @@ class MMLongLoader(BaseDataLoader):
         except json.JSONDecodeError:
             return {"evidence": content, "bbox": []}
 
-    # --- 新增：LLM 答案提取逻辑 ---
     def _extract_answer_with_llm(self, question: str, raw_response: str, llm_caller: Callable[[str], str]) -> Dict[str, Any]:
         """
         使用 LLM 从长回复中提取标准答案。
-        :param llm_caller: 一个函数，输入 prompt 字符串，输出 LLM 的回复字符串。
         """
         if not raw_response:
             return {"extracted_answer": "", "answer_format": "String"}
             
-        prompt = MMLONG_EXTRACT_PROMPT_TEMPLATE.replace("[question]", question).replace("[analysis]", raw_response)
+        # Construct the prompt with the question and analysis appended at the end
+        prompt = MMLONG_EXTRACT_PROMPT_TEMPLATE.format(question=question, analysis=raw_response)
         
         try:
             # 调用外部传入的 LLM 函数
@@ -136,15 +300,10 @@ class MMLongLoader(BaseDataLoader):
                 extracted_answer = ans_match.group(1).strip()
             if fmt_match:
                 answer_format = fmt_match.group(1).strip()
-                
-            # 简单的类型转换
-            if answer_format.lower() == "list":
-                try:
-                    # 尝试将字符串列表转为 Python list
-                    if extracted_answer.startswith("[") and extracted_answer.endswith("]"):
-                         extracted_answer = ast.literal_eval(extracted_answer)
-                except:
-                    pass
+            
+            # 基础清理
+            if extracted_answer.startswith("'") and extracted_answer.endswith("'"):
+                extracted_answer = extracted_answer[1:-1]
             
             return {
                 "extracted_answer": extracted_answer,
@@ -155,92 +314,9 @@ class MMLongLoader(BaseDataLoader):
             print(f"Error during LLM extraction: {e}")
             return {"extracted_answer": raw_response, "answer_format": "String"}
 
-    # --- 新增：MMLongBench-Doc 定义的评分规则 (Appendix B.3) ---
-    def _compute_mmlong_score(self, pred: Any, gold: Any, fmt: str) -> float:
-        """
-        根据 Appendix B.3 计算分数
-        """
-        def normalize_str(s):
-            return str(s).lower().strip()
-
-        # 1. 预处理 Not Answerable
-        if normalize_str(gold) == "not answerable":
-            return 1.0 if normalize_str(pred) == "not answerable" else 0.0
-        
-        fmt = fmt.lower()
-        
-        # 2. String: ANLS with threshold 0.5
-        if "string" in fmt:
-            s1 = normalize_str(pred)
-            s2 = normalize_str(gold)
-            dist = levenshtein_distance(s1, s2)
-            max_len = max(len(s1), len(s2))
-            if max_len == 0: return 1.0
-            nl = dist / max_len
-            return 1.0 - nl if nl < 0.5 else 0.0
-
-        # 3. Integer: Exact Match
-        elif "integer" in fmt:
-            try:
-                # 尝试转 float 比较以处理 '10' vs '10.0'
-                return 1.0 if float(pred) == float(gold) else 0.0
-            except:
-                return 1.0 if normalize_str(pred) == normalize_str(gold) else 0.0
-
-        # 4. Float: 1% relative tolerance
-        elif "float" in fmt:
-            try:
-                p_val = float(pred)
-                g_val = float(gold)
-                if abs(p_val - g_val) / (abs(g_val) + 1e-9) <= 0.01:
-                    return 1.0
-                return 0.0
-            except:
-                return 0.0
-
-        # 5. List: Minimum element-wise score (Order matters in strict matching, 
-        # but paper says "score each element in order", implying aligned lists)
-        elif "list" in fmt:
-            if not isinstance(pred, list): 
-                # 尝试解析
-                try: pred = ast.literal_eval(str(pred))
-                except: pred = [str(pred)]
-            if not isinstance(gold, list):
-                try: gold = ast.literal_eval(str(gold))
-                except: gold = [str(gold)]
-                
-            if not isinstance(pred, list) or not isinstance(gold, list):
-                return 0.0
-            
-            if len(pred) != len(gold):
-                return 0.0
-            
-            # Paper Eq 1: Sort lists then compare element-wise
-            # "pred_list, ref_list = sorted(pred_list), sorted(ref_list)"
-            try:
-                pred.sort(key=lambda x: str(x))
-                gold.sort(key=lambda x: str(x))
-            except:
-                pass # 无法排序则按原顺序
-            
-            scores = []
-            for p, g in zip(pred, gold):
-                # 递归调用评分，默认元素为 String 处理（论文未详述元素类型，通常假设为 String/Number）
-                # 这里简化为 String ANLS 处理
-                scores.append(self._compute_mmlong_score(p, g, "string"))
-            
-            return min(scores) if scores else 0.0
-
-        # Default fallback
-        return 0.0 if normalize_str(pred) != normalize_str(gold) else 1.0
-
     def evaluate(self) -> Dict[str, float]:
         """
         执行评估。
-        
-        :param llm_caller: (Optional) 用于 Answer Extraction 的 LLM 调用函数。
-                           如果为 None，将跳过 LLM 提取步骤，直接使用 raw prediction 进行评分（可能导致分数偏低）。
-                           Signature: func(prompt: str) -> str
         """
         total_metrics = collections.defaultdict(float)
         counts = collections.defaultdict(int)
@@ -257,10 +333,12 @@ class MMLongLoader(BaseDataLoader):
             
             metrics_result = {}
             
-            # --- 1. QA Evaluation (Updated with LLM Extraction) ---
+            # --- 1. QA Evaluation ---
             raw_pred_answer = sample.extra_info.get('final_answer', "")
+            # raw_pred_answer = 'Based on the provided document, specifically the pie chart on page 4 (image 0) titled "Latinos see economic upward mobility for their children", 5% of Latinos expect their children to be **less well off** financially than they themselves are now.'
             gold_answer = sample.gold_answer
-            gold_format = sample.extra_info.get('answer_format', 'String') # 从数据集中获取黄金格式
+            # 默认为 String，但会尝试从数据集或提取步骤更新
+            gold_format = sample.extra_info.get('answer_format', 'String') 
 
             if gold_answer:
                 final_pred_to_score = raw_pred_answer
@@ -269,19 +347,21 @@ class MMLongLoader(BaseDataLoader):
                 if self.llm_caller and raw_pred_answer:
                     extract_res = self._extract_answer_with_llm(sample.query, raw_pred_answer, self.llm_caller)
                     final_pred_to_score = extract_res['extracted_answer']
-                    gold_format = extract_res['answer_format']
-                    # 记录提取后的答案以便 debug
+                    # 如果提取结果给出了特定格式，优先使用提取的格式，否则回退到数据集格式
+                    # 注意：eval_score 需要正确的 format 来决定比较逻辑 (Int vs String vs List)
+                    if extract_res['answer_format']:
+                        gold_format = extract_res['answer_format']
+                    
                     sample.extra_info['extracted_answer'] = final_pred_to_score
                 
-                # B. Scoring Step
-                score = self._compute_mmlong_score(final_pred_to_score, gold_answer, gold_format)
+                # B. Scoring Step (Use ported eval_score)
+                score = eval_score(gold_answer, final_pred_to_score, gold_format)
                 
                 metrics_result['qa_score'] = score
                 total_metrics['qa_score'] += score
                 counts['qa'] += 1
             
-            # --- 2. Page Retrieval Evaluation (Keep original logic) ---
-            # 尝试获取预测的 elements
+            # --- 2. Page Retrieval Evaluation ---
             raw_elements = sample.extra_info.get('retrieved_elements', [])
             pred_elements = []
             for el in raw_elements:
@@ -293,8 +373,6 @@ class MMLongLoader(BaseDataLoader):
                     pred_elements.append(el)
 
             if sample.gold_pages:
-                # Assuming _compute_page_metrics exists in BaseDataLoader or implemented locally
-                # If not, we use a simple placeholder logic based on filename matching
                 page_score = {'recall': 0.0, 'precision': 0.0}
                 if hasattr(self, '_compute_page_metrics'):
                      page_score = self._compute_page_metrics(pred_elements, sample.gold_pages)
@@ -319,7 +397,7 @@ class MMLongLoader(BaseDataLoader):
         return avg_results
     
     def load_data(self) -> None:
-        """根据新的 samples.json 格式加载数据。"""
+        """根据 samples.json 格式加载数据。"""
         if not os.path.exists(self.json_path):
             raise FileNotFoundError(f"MMLongBench data file not found: {self.json_path}")
         
@@ -367,7 +445,6 @@ class MMLongLoader(BaseDataLoader):
         print(f"✅ Successfully loaded {count} MMLongBench samples.")
 
     def _pdf_to_images(self, pdf_path: str) -> Dict[int, str]:
-        """将 PDF 转换为图片序列，并保存到缓存目录。"""
         if not os.path.exists(pdf_path):
              print(f"Warning: PDF not found at {pdf_path}")
              return {}
@@ -389,7 +466,7 @@ class MMLongLoader(BaseDataLoader):
                     idx = int(match.group(1))
                     temp_map[idx] = os.path.join(cache_dir, f)
             if temp_map:
-                print(f"Using cached images for {pdf_name} ({len(temp_map)} pages)")
+                # print(f"Using cached images for {pdf_name} ({len(temp_map)} pages)")
                 return temp_map
 
         # 2. Convert if no cache
@@ -413,15 +490,11 @@ class MMLongLoader(BaseDataLoader):
         return image_map
 
     def rerank(self, query: str, pages: List[PageElement]) -> List[PageElement]:
-        """
-        执行重排序。内部通过 get_reranker() 获取单例。
-        """
-        # 获取单例模型
         reranker = self.get_reranker(self.reranker_model_path)
         if not reranker or not pages:
             return pages
             
-        print(f"Reranking {len(pages)} pages...")
+        # print(f"Reranking {len(pages)} pages...")
         documents_input = [{"image": page.crop_path} for page in pages]
         rerank_input = {
             "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
@@ -446,10 +519,6 @@ class MMLongLoader(BaseDataLoader):
             return pages
 
     def pipeline(self, query: str, image_paths: List[str] = None,  top_k: int = 5) -> List[PageElement]:
-        """
-        Logic Updated:
-        Lazy load and run reranker ONLY if len(pages) > top_k.
-        """
         if self.extractor is None:
             print("Error: ElementExtractor is not initialized in MMLongLoader.")
             return []
@@ -485,17 +554,11 @@ class MMLongLoader(BaseDataLoader):
 
         # --- 3. Conditional Lazy Reranking ---
         target_pages = candidate_pages
-        
-        # 仅当 页面数量 > Top_K 且 配置了模型路径 时，才触发重排
         if self.reranker_model_path and len(candidate_pages) > top_k:
-            print(f"Page Count ({len(candidate_pages)}) > Top_K ({top_k}). Triggering Rerank...")
+            # print(f"Page Count ({len(candidate_pages)}) > Top_K ({top_k}). Triggering Rerank...")
             ranked_pages = self.rerank(query, candidate_pages)
             target_pages = ranked_pages[:top_k]
         else:
-            if len(candidate_pages) <= top_k:
-                print(f"Page Count ({len(candidate_pages)}) <= Top_K ({top_k}). Skipping Rerank.")
-            else:
-                print(f"No Reranker configured. Taking first {top_k} pages.")
             target_pages = candidate_pages[:top_k]
 
         # --- 4. Element Extraction (Agent) ---
@@ -607,8 +670,6 @@ class MMLongLoader(BaseDataLoader):
 if __name__ == "__main__":
     # Test code
     root_dir = "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/MMLongBench-Doc"
-    
-    # Pass path instead of instance
     reranker_path = "/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B"
 
     loader = MMLongLoader(data_root=root_dir, reranker_model_path=reranker_path)
@@ -627,16 +688,13 @@ if __name__ == "__main__":
                 tool=tool
             )
             loader.extractor = extractor
+            loader.llm_caller = create_llm_caller()
             
-            # This should trigger reranker ONLY if pdf pages > 2 (for test)
+            # Use top_k=2 for testing
             if s.data_source.endswith(".pdf"):
                 print("Testing Pipeline...")
                 results = loader.pipeline(s.query, image_paths=[s.data_source], top_k=2)
-                print(f"Extracted {len(results)} elements.")
-                for res in results:
-                    print(f" - Content: {res.content} \n - Crop: {res.crop_path}")
                 s.extra_info['retrieved_elements'] = results
-                loader.llm_caller = create_llm_caller()
                 loader.evaluate()
     except Exception as e:
         print(f"Test failed: {e}")
