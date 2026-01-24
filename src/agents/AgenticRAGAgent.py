@@ -255,7 +255,7 @@ class AgenticRAGAgent(RAGAgent):
                 sample.extra_info['final_answer'] = cached_data.get('final_answer', "")
                 sample.extra_info['messages'] = cached_data.get('messages', [])
                 
-                if sample.extra_info['final_answer'] and sample.extra_info['messages']:
+                if sample.extra_info['final_answer'] and "Error during" not in sample.extra_info['final_answer']:
                     # 恢复 retrieved_elements 对象列表
                     elements_dicts = cached_data.get('retrieved_elements', [])
                     restored_elements = []

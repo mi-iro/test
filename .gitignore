@@ -3,4 +3,4 @@ workspace
 backup/
 .vscode
 MMLongBench-Doc/
-results_*/
+*_results_*/

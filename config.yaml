@@ -1,0 +1,5 @@
+output_dir: "./results_finrag"
+data_root: "/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V"
+benchmark: "finrag"
+limit: 2
+# infer_only: true

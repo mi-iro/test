@@ -3,6 +3,8 @@ import os
 import sys
 import torch
 import asyncio
+import json
+import yaml  # 需要安装 pyyaml: pip install pyyaml
 
 # 确保项目根目录在 sys.path 中，以便导入 src 模块
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -20,8 +22,16 @@ try:
 except ImportError:
     print("Warning: Qwen3 VL scripts not found.")
 
-def parse_args():
+def get_parser():
+    """定义参数解析器，但不立即解析"""
     parser = argparse.ArgumentParser(description="Run AgenticRAGAgent benchmark evaluation.")
+
+    # ------------------ 新增配置 ------------------
+    # 配置文件路径
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file.")
+    # 推理模式开关 (只跑推理，不跑评估)
+    parser.add_argument("--infer_only", action="store_true", help="If set, skip the evaluation step and only run inference.")
+    # ---------------------------------------------
 
     # 基础配置
     parser.add_argument("--benchmark", type=str, default="mmlong", choices=["mmlong", "finrag"], help="Target benchmark to run.")
@@ -54,10 +64,35 @@ def parse_args():
     parser.add_argument("--finrag_lang", type=str, default="ch", choices=["ch", "en", "bbox"], help="Language/subset for FinRAG.")
     parser.add_argument("--force_rebuild_index", action="store_true", help="Force rebuild vector index for FinRAG.")
 
-    return parser.parse_args()
+    return parser
+
+def parse_args_with_config():
+    """
+    解析参数，支持从YAML文件加载配置。
+    优先级: 命令行参数 > YAML文件 > 默认值
+    """
+    parser = get_parser()
+    
+    # 1. 预解析，检查是否有 config 参数
+    temp_args, _ = parser.parse_known_args()
+    
+    # 2. 如果指定了 config 文件，加载并更新 defaults
+    if temp_args.config and os.path.exists(temp_args.config):
+        print(f"📄 Loading configuration from {temp_args.config}...")
+        with open(temp_args.config, 'r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+            if config_data:
+                parser.set_defaults(**config_data)
+    elif temp_args.config:
+        print(f"⚠️ Warning: Config file {temp_args.config} not found. Using defaults.")
+
+    # 3. 最终解析 (确保命令行参数覆盖 YAML 配置)
+    args = parser.parse_args()
+    return args
 
 def main():
-    args = parse_args()
+    # 使用支持 Config 的解析逻辑
+    args = parse_args_with_config()
 
     # 1. 目录准备
     os.makedirs(args.output_dir, exist_ok=True)
@@ -66,9 +101,18 @@ def main():
     os.makedirs(workspace_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
 
+    # ------------------ 修改：保存为 YAML ------------------
+    config_path = os.path.join(args.output_dir, "config.yaml")
+    with open(config_path, "w", encoding="utf-8") as f:
+        # default_flow_style=False 确保输出为块状格式，更易读
+        yaml.dump(vars(args), f, default_flow_style=False, allow_unicode=True)
+    print(f"📝 Configuration saved to: {config_path}")
+    # -----------------------------------------------------
+
     print(f"🚀 Starting Benchmark: {args.benchmark.upper()}")
     print(f"📂 Data Root: {args.data_root}")
     print(f"💾 Output Dir: {args.output_dir}")
+    print(f"🔄 Infer Only Mode: {args.infer_only}")
 
     # 2. 初始化底层工具与提取器 (ElementExtractor)
     print("🛠️ Initializing Tools and Extractor...")
@@ -78,8 +122,6 @@ def main():
         mineru_model_path=args.mineru_model_path
     )
     
-    # 注意：Extractor 通常使用 Vision 模型 (如 qwen-vl-max 或 qwen3-vl-instruct)
-    # 这里复用 args.base_url，但你可以根据需要分离 Extractor 的 LLM 配置
     extractor = ElementExtractor(
         base_url=args.extractor_base_url,
         api_key=args.extractor_api_key,
@@ -104,7 +146,6 @@ def main():
         if not args.embedding_model or not args.reranker_model:
             raise ValueError("FinRAG benchmark requires --embedding_model and --reranker_model.")
         
-        # 加载本地模型
         print("   Loading Embedding Model (this may take time)...")
         embedder = Qwen3VLEmbedder(model_name_or_path=args.embedding_model, torch_dtype=torch.float16)
         print("   Loading Reranker Model...")
@@ -119,7 +160,6 @@ def main():
         )
         loader.load_data()
         
-        # 建立或加载索引
         loader.build_page_vector_pool(batch_size=4, force_rebuild=args.force_rebuild_index)
 
     # 设置用于评估的 LLM Helper
@@ -153,18 +193,23 @@ def main():
     json_path = os.path.join(args.output_dir, f"{args.benchmark}_results.json")
     agent.save_results(excel_path=excel_path, json_path=json_path)
 
-    # 8. 执行评估
-    print("\n📈 Starting Evaluation...")
-    try:
-        metrics = loader.evaluate()
-        # 保存评估指标
-        metrics_path = os.path.join(args.output_dir, "evaluation_metrics.json")
-        with open(metrics_path, "w", encoding="utf-8") as f:
-            import json
-            json.dump(metrics, f, indent=2)
-        print(f"✅ Evaluation complete. Metrics saved to {metrics_path}")
-    except Exception as e:
-        print(f"❌ Evaluation failed: {e}")
+    # 8. 执行评估 (根据 infer_only 开关决定是否跳过)
+    # ------------------ 修改：Infer Only 逻辑 ------------------
+    if args.infer_only:
+        print("\n⏭️  Skipping Evaluation (Infer Only Mode Enabled).")
+        print(f"✅ Inference complete. Results saved to {args.output_dir}")
+    else:
+        print("\n📈 Starting Evaluation...")
+        try:
+            metrics = loader.evaluate()
+            # 保存评估指标
+            metrics_path = os.path.join(args.output_dir, "evaluation_metrics.json")
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2)
+            print(f"✅ Evaluation complete. Metrics saved to {metrics_path}")
+        except Exception as e:
+            print(f"❌ Evaluation failed: {e}")
+    # ---------------------------------------------------------
 
 if __name__ == "__main__":
     main()
