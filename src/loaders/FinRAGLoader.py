@@ -17,7 +17,7 @@ import uuid
 try:
     from rouge_score import rouge_scorer
 except ImportError:
-    print("Warning: rouge_score not installed. Install via `pip install rouge-score`.")
+    # 即使只用Model Eval，保留此检查以防依赖报错，但在本逻辑中不会使用它
     rouge_scorer = None
 
 # Adjust path to ensure we can import from src and scripts
@@ -30,7 +30,7 @@ from src.agents.ElementExtractor import ElementExtractor
 from src.utils.llm_helper import create_llm_caller
 
 # ---------------------------------------------------------
-# Helper Functions (Ported from finragbench_utils.py & eval scripts)
+# Helper Functions
 # ---------------------------------------------------------
 
 def encode_image_to_base64(image_path):
@@ -39,21 +39,6 @@ def encode_image_to_base64(image_path):
         return None
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
-
-def calculate_recall(expected_answer, actual_answer):
-    expected_tokens = set(expected_answer.strip().split())
-    actual_tokens = set(actual_answer.strip().split())
-    common_tokens = expected_tokens.intersection(actual_tokens)
-    if len(expected_tokens) == 0:
-        return 0 if len(actual_tokens) > 0 else 1
-    return len(common_tokens) / len(expected_tokens)
-
-def calculate_rouge(expected_answer, actual_answer):
-    if not rouge_scorer:
-        return 0.0
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
-    scores = scorer.score(expected_answer, actual_answer)
-    return scores["rougeL"].fmeasure
 
 class FinRAGLoader(BaseDataLoader):
     def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
@@ -78,6 +63,7 @@ class FinRAGLoader(BaseDataLoader):
         self.index = None
         self.doc_id_map = {} 
         self.llm_caller = None
+        self.llm_element_judge = False
 
     def _load_qrels(self) -> Dict[str, List[str]]:
         """读取 qrels TSV 文件。"""
@@ -377,7 +363,6 @@ class FinRAGLoader(BaseDataLoader):
                     loop = None
                 
                 if loop and loop.is_running():
-                    # Handle async environment if needed
                     print("Warning: Async event loop is already running. Cannot use asyncio.run(). Skipping this page.")
                     continue
                 else:
@@ -479,67 +464,46 @@ class FinRAGLoader(BaseDataLoader):
         return elements
 
     # --------------------------------------------------------------------------------
-    # Evaluation Methods (Integrated from finragbench_eval_generation.py & citation.py)
+    # Evaluation Methods (Modified to ONLY use Model Eval)
     # --------------------------------------------------------------------------------
 
     def _evaluate_answer_correctness(self, sample: StandardSample) -> Dict[str, Any]:
         """
-        基于 finragbench_eval_generation.py 的逻辑评估答案正确性。
-        支持 'short' 和 'long' 两种 answer_type。
+        MODIFIED: 强制对所有类型的样本使用 LLM 进行正确性评估 (Model Eval)。
+        忽略 answer_type (short/long) 的区别。
         """
         query_text = sample.query
         expected_answer = sample.gold_answer
-        # 从 extra_info 获取 answer_type，默认为 short
-        answer_type = sample.extra_info.get('answer_type', 'short') if sample.extra_info else 'short'
-        
-        # 实际答案
         actual_answer = sample.extra_info.get('final_answer', "error output") if sample.extra_info else "error output"
 
-        em_score = recall_score = -1
-        rouge_score = model_eval = 0
+        model_eval = 0
 
-        # Short Answer Evaluation
-        if answer_type == "short" or answer_type == "短答案":
-            if "error output" in actual_answer:
-                em_score = 0
-                recall_score = 0
-            else:
-                em_score = 1 if expected_answer.strip() == actual_answer.strip() else 0
-                recall_score = calculate_recall(expected_answer, actual_answer)
-
-        # Long Answer Evaluation (Rouge & LLM Judge)
-        if "error output" in actual_answer:
-            rouge_score = 0
+        # 如果没有 LLM Caller 或答案为空，直接判定为 0
+        if "error output" in actual_answer or not self.llm_caller:
             model_eval = 0
         else:
-            rouge_score = calculate_rouge(expected_answer, actual_answer)
-
-            # LLM Judge (Model Eval)
-            if self.llm_caller:
-                evaluation_prompt = (
-                    f"Question: {query_text}\n"
-                    f"Ground_truth: {expected_answer}\n"
-                    f"Model_answer: {actual_answer}\n"
-                    f"Is the model answer correct? You only need to output 'true' for correct or 'false' for incorrect. "
-                    f"If the model answer does not contain any information, it should be judged as 'false'."
-                )
-                try:
-                    response_core = self.llm_caller(evaluation_prompt)
-                    model_eval = 1 if "true" in response_core.lower() else 0
-                except Exception as e:
-                    print(f"Error during model eval for QID {sample.qid}: {e}")
-                    model_eval = 0
+            # 统一构建 Prompt，不区分长短答案
+            evaluation_prompt = (
+                f"Question: {query_text}\n"
+                f"Ground_truth: {expected_answer}\n"
+                f"Model_answer: {actual_answer}\n"
+                f"Is the model answer correct? You only need to output 'true' for correct or 'false' for incorrect. "
+                f"If the model answer does not contain any information, it should be judged as 'false'."
+            )
+            try:
+                response_core = self.llm_caller(evaluation_prompt)
+                model_eval = 1 if "true" in response_core.lower() else 0
+            except Exception as e:
+                print(f"Error during model eval for QID {sample.qid}: {e}")
+                model_eval = 0
 
         return {
-            "em_score": em_score,
-            "recall_score": recall_score,
-            "rouge_score": rouge_score,
             "model_eval": model_eval
         }
 
     def _check_images_entailment(self, elements: List[PageElement], answer: str) -> bool:
         """
-        基于 finragbench_eval_citation.py 的逻辑检查图片证据是否蕴含答案。
+        检查图片证据是否蕴含答案 (保持原逻辑，这本身就是一种 Model Eval)。
         """
         if not elements or not self.llm_caller:
             return False
@@ -550,7 +514,6 @@ class FinRAGLoader(BaseDataLoader):
             {"type": "text", "text": "Here is my file page:"}
         ]
 
-        # 添加图片证据
         valid_images = 0
         for el in elements:
             if el.crop_path and os.path.exists(el.crop_path):
@@ -581,55 +544,37 @@ class FinRAGLoader(BaseDataLoader):
 
     def evaluate(self) -> Dict[str, float]:
         """
-        执行完整的评估流程，包含 Answer Correctness 和 Citation Entailment。
-        :return: 汇总指标字典
+        MODIFIED: 仅计算平均 Model Eval 以及 Citation Entailment。
         """        
         total_metrics = {
-            "em_score": 0, "recall_score": 0, 
-            "rouge_score": 0, "model_eval": 0,
+            "model_eval": 0,
             "entailment_recall": 0, "entailment_precision": 0
         }
         counts = {
-            "short": 0, "long": 0, "total": 0, "citation": 0
+            "total": 0, "citation": 0
         }
 
-        print(f"Starting Evaluation on {len(self.samples)} samples...")
+        print(f"Starting ONLY-MODEL Evaluation on {len(self.samples)} samples...")
         
         for sample in tqdm(self.samples, desc="Evaluating"):
             if sample.extra_info is None:
                 sample.extra_info = {}
             
-            # 1. Evaluate Answer Correctness
+            # 1. Evaluate Answer Correctness (Using ONLY LLM Judge)
             corr_metrics = self._evaluate_answer_correctness(sample)
             sample.extra_info['correctness_metrics'] = corr_metrics
             
-            # Aggregate Correctness Metrics
-            answer_type = sample.extra_info.get('answer_type', 'short')
-            if answer_type == 'short' or answer_type == '短答案':
-                total_metrics['em_score'] += corr_metrics['em_score']
-                total_metrics['recall_score'] += corr_metrics['recall_score']
-                counts['short'] += 1
-            else:
-                total_metrics['rouge_score'] += corr_metrics['rouge_score']
-                total_metrics['model_eval'] += corr_metrics['model_eval']
-                counts['long'] += 1
-            
+            # 累加分数
+            total_metrics['model_eval'] += corr_metrics['model_eval']
             counts['total'] += 1
 
-            # 2. Evaluate Citation Entailment (Requires LLM Client)
-            if self.llm_caller:
-                # 获取 RAG 过程中检索到的 Elements (通常存储在 retrieved_elements 或由 pipeline 生成)
-                # 这里假设 pipeline 运行后结果存储在 'retrieved_elements' 中，或者是手动调用 pipeline
-                # 为了通用性，这里只检查 extra_info 中是否已经有了 evidence elements
-                
-                # 如果是运行过 pipeline，extra_info 应该包含检索结果
-                # 如果没有，跳过引用评估
+            # 2. Evaluate Citation Entailment (Optional, but is also LLM based)
+            if self.llm_element_judge and self.llm_caller:
                 retrieved_elements = sample.extra_info.get('retrieved_elements', [])
-                # 转换回 PageElement 对象列表 (如果被序列化为 dict)
+                # Convert back to PageElement objects if necessary
                 elements_obj = []
                 for el in retrieved_elements:
                     if isinstance(el, dict):
-                         # 简单的 dict 转 obj
                          pe = PageElement(**{k:v for k,v in el.items() if k in PageElement.__annotations__})
                          elements_obj.append(pe)
                     elif isinstance(el, PageElement):
@@ -638,19 +583,17 @@ class FinRAGLoader(BaseDataLoader):
                 final_answer = sample.extra_info.get('final_answer', "")
                 
                 if elements_obj and final_answer:
-                    # 计算 Recall: 是否所有检索图片作为一个整体蕴含了答案
+                    # Entailment Recall
                     entailment_recall_bool = self._check_images_entailment(elements_obj, final_answer)
                     entailment_recall = 1 if entailment_recall_bool else 0
                     
-                    # 计算 Precision: 如果 Recall 为 1，检查每张图片是否必要 (Leave-One-Out)
+                    # Entailment Precision
                     entailment_precision = 0
                     if entailment_recall == 1:
                         precision_scores = []
                         if len(elements_obj) == 1:
                             entailment_precision = 1
                         else:
-                            # 简化版 Precision 计算 (参考 eval_citation.py)
-                            # 逐个检查图片是否能支持答案
                             for i, img_el in enumerate(elements_obj):
                                 single_cover = self._check_images_entailment([img_el], final_answer)
                                 precision_scores.append(1 if single_cover else 0)
@@ -669,19 +612,15 @@ class FinRAGLoader(BaseDataLoader):
 
         # Calculate Averages
         avg_results = {}
-        if counts['short'] > 0:
-            avg_results['avg_em'] = total_metrics['em_score'] / counts['short']
-            avg_results['avg_recall'] = total_metrics['recall_score'] / counts['short']
         
-        if counts['long'] > 0:
-            avg_results['avg_rouge'] = total_metrics['rouge_score'] / counts['long']
-            avg_results['avg_model_eval'] = total_metrics['model_eval'] / counts['long']
+        if counts['total'] > 0:
+            avg_results['avg_model_eval'] = total_metrics['model_eval'] / counts['total']
             
         if counts['citation'] > 0:
             avg_results['avg_entailment_recall'] = total_metrics['entailment_recall'] / counts['citation']
             avg_results['avg_entailment_precision'] = total_metrics['entailment_precision'] / counts['citation']
 
-        print(f"Evaluation Results: {avg_results}")
+        print(f"Evaluation Results (Model Eval Only): {avg_results}")
         return avg_results
 
 if __name__ == "__main__":
