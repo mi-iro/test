@@ -131,17 +131,18 @@ class RAGAgent:
                 sample.extra_info['final_answer'] = cached_data.get('final_answer', "")
                 sample.extra_info['messages'] = cached_data.get('messages', [])
                 
-                # 恢复 retrieved_elements 对象列表
-                elements_dicts = cached_data.get('retrieved_elements', [])
-                restored_elements = []
-                for el_dict in elements_dicts:
-                    # 过滤掉非 PageElement 字段以防止报错
-                    valid_keys = PageElement.__annotations__.keys()
-                    filtered_dict = {k: v for k, v in el_dict.items() if k in valid_keys}
-                    restored_elements.append(PageElement(**filtered_dict))
-                
-                sample.extra_info['retrieved_elements'] = restored_elements
-                return sample
+                if sample.extra_info['final_answer'] and "Error during" not in sample.extra_info['final_answer']:
+                    # 恢复 retrieved_elements 对象列表
+                    elements_dicts = cached_data.get('retrieved_elements', [])
+                    restored_elements = []
+                    for el_dict in elements_dicts:
+                        # 过滤掉非 PageElement 字段以防止报错
+                        valid_keys = PageElement.__annotations__.keys()
+                        filtered_dict = {k: v for k, v in el_dict.items() if k in valid_keys}
+                        restored_elements.append(PageElement(**filtered_dict))
+                    
+                    sample.extra_info['retrieved_elements'] = restored_elements
+                    return sample
             except Exception as e:
                 print(f"Error loading cache for {sample.qid}, rerunning inference. Error: {e}")
 

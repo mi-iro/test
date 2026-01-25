@@ -30,10 +30,10 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Run RAG Evaluation (Agentic or Standard).")
 
     # ------------------ 核心控制参数 (新增) ------------------
-    parser.add_argument("--agent_type", type=str, default="agentic", choices=["agentic", "standard"], 
+    parser.add_argument("--agent_type", type=str, default="standard", choices=["agentic", "standard"], 
                         help="Choose the type of agent: 'agentic' (ReAct loop) or 'standard' (One-pass RAG).")
     parser.add_argument("--top_k", type=int, default=5, 
-                        help="Number of documents to retrieve (Only used for Standard RAG).")
+                        help="Top-K Parameter.")
     # -------------------------------------------------------
 
     # 配置文件路径
@@ -55,7 +55,7 @@ def get_parser():
     parser.add_argument("--max_rounds", type=int, default=5, help="Max thinking rounds (Only for Agentic RAG).")
     
     # 测试限制
-    parser.add_argument("--limit", type=int, default=5, help="Limit number of samples.")
+    parser.add_argument("--limit", type=int, default=1, help="Limit number of samples.")
 
     # 模型路径 (FinRAG / Reranker)
     parser.add_argument("--embedding_model", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Embedding-8B")
