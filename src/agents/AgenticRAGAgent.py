@@ -87,6 +87,7 @@ class AgenticRAGAgent(RAGAgent):
         api_key: str, 
         model_name: str, 
         max_rounds: int,
+        top_k: int = 10,
         cache_dir: str = "./cache_results"  # 新增缓存目录参数
     ):
         """
@@ -102,6 +103,7 @@ class AgenticRAGAgent(RAGAgent):
         self.model_name = model_name
         self.max_rounds = max_rounds
         self.cache_dir = cache_dir
+        self.top_k = top_k
         
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -131,7 +133,7 @@ class AgenticRAGAgent(RAGAgent):
             print(f"  [Agent Action] Searching for: {query}")
             
             try:
-                elements = self.loader.pipeline(query=query, image_paths=[sample.data_source], top_k=10)
+                elements = self.loader.pipeline(query=query, image_paths=[sample.data_source], top_k=self.top_k)
                 
                 if not elements:
                     return "No relevant evidence found."
