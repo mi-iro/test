@@ -207,6 +207,7 @@ class RAGAgent:
             cache_data = {
                 "qid": sample.qid,
                 "query": sample.query,
+                "gold_answer": sample.gold_answer,
                 "final_answer": final_answer,
                 "messages": sample.extra_info['messages'], # 注意：包含大量 base64 图片URL，文件可能会较大
                 "retrieved_elements": elements_to_save
