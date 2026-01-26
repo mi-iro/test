@@ -4,3 +4,5 @@ backup/
 .vscode
 MMLongBench-Doc/
 *results_*/
+RegionRAG/
+VisRAG/

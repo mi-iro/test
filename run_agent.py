@@ -32,7 +32,7 @@ def get_parser():
     # ------------------ 核心控制参数 (新增) ------------------
     parser.add_argument("--agent_type", type=str, default="standard", choices=["agentic", "standard"], 
                         help="Choose the type of agent: 'agentic' (ReAct loop) or 'standard' (One-pass RAG).")
-    parser.add_argument("--top_k", type=int, default=5, 
+    parser.add_argument("--top_k", type=int, default=10, 
                         help="Top-K Parameter.")
     # -------------------------------------------------------
 
@@ -47,7 +47,7 @@ def get_parser():
     parser.add_argument("--output_dir", type=str, default="./results_rag", help="Directory to save results.")
     
     # LLM 配置
-    parser.add_argument("--model_name", type=str, default="qwen3-max", help="LLM model name.")
+    parser.add_argument("--model_name", type=str, default="qwen2.5-72b-instruct", help="LLM model name.")
     parser.add_argument("--base_url", type=str, default="http://localhost:3888/v1", help="LLM API Base URL.")
     parser.add_argument("--api_key", type=str, default="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR", help="LLM API Key.")
     
@@ -55,7 +55,7 @@ def get_parser():
     parser.add_argument("--max_rounds", type=int, default=5, help="Max thinking rounds (Only for Agentic RAG).")
     
     # 测试限制
-    parser.add_argument("--limit", type=int, default=1, help="Limit number of samples.")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples.")
 
     # 模型路径 (FinRAG / Reranker)
     parser.add_argument("--embedding_model", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Embedding-8B")

@@ -459,7 +459,7 @@ class FinRAGLoader(BaseDataLoader):
         if self.lang == "bbox":
             ranked_pages = [PageElement(bbox=[0,0,1000,1000],type="page_image",content=None,corpus_id=image_paths[0].split('/')[-1],corpus_path=image_paths[0],crop_path=image_paths[0])]
         else:
-            pages = self.retrieve(query, top_k=top_k*2)
+            pages = self.retrieve(query, top_k=top_k*4)
             ranked_pages = self.rerank(query, pages)
             ranked_pages = ranked_pages[:top_k]
         elements = self.extract_elements_from_pages(ranked_pages, query)
