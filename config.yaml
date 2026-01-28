@@ -1,5 +1,12 @@
-output_dir: "./results_finrag"
+output_dir: "./results_fingrag_ch_qwen2.5-vl-72b-instruct"
 data_root: "/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V"
 benchmark: "finrag"
-limit: 2
+extractor_model_name: "MinerU-Agent-CK800"
+model_name: "Qwen2.5-VL-72B-Instruct"
+base_url: http://localhost:8002/v1
+num_threads: 4
+# reranker_model: "Qwen3-VL-Reranker-8B"
+# reranker_api_base: "http://localhost:8002/v1"
+# reranker_api_key: ""
+# limit: 1
 # infer_only: true

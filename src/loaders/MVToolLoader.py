@@ -52,6 +52,117 @@ class MVToolLoader(BaseDataLoader):
             print(f"Warning: Failed to decode JSON content: {content[:50]}...")
             return {"evidence": content, "bbox": []}
 
+    def evaluate(self, beta: float = 1.0) -> Dict[str, float]:
+        """
+        执行评估：计算 QA 指标、页面检索指标和元素提取指标。
+        整合了 eval.py 中的 Page Accuracy, IoU Min, IoU EM 等高级指标。
+        
+        评估结果将存储在每个 sample.extra_info['metrics'] 中。
+        依赖 sample.extra_info 包含 'final_answer' 和 'retrieved_elements'。
+        
+        Returns:
+            Dict[str, float]: 整个数据集的平均指标
+        """
+        total_metrics = collections.defaultdict(float)
+        counts = collections.defaultdict(int)
+
+        for sample in self.samples:
+            if sample.extra_info is None:
+                sample.extra_info = {}
+
+            # --- 获取预测结果 ---
+            pred_answer = sample.extra_info.get('final_answer', "")
+            
+            # 尝试获取预测的 elements (兼容 dict 列表或 PageElement 对象列表)
+            raw_elements = sample.extra_info.get('retrieved_elements', [])
+            pred_elements = []
+            for el in raw_elements:
+                if isinstance(el, dict):
+                    # 过滤掉非 PageElement 字段以防止 TypeError
+                    valid_keys = PageElement.__annotations__.keys()
+                    filtered_el = {k: v for k, v in el.items() if k in valid_keys}
+                    pred_elements.append(PageElement(**filtered_el))
+                elif isinstance(el, PageElement):
+                    pred_elements.append(el)
+            
+            # 获取 BBoxes 列表 (用于 element metrics 计算)
+            # 过滤掉无效的 bbox (例如全0或长度不为4)
+            pred_bboxes = [p.bbox for p in pred_elements if p.bbox and len(p.bbox) == 4 and calculate_area(p.bbox) > 0]
+            gt_bboxes = [g.bbox for g in sample.gold_elements if g.bbox and len(g.bbox) == 4 and calculate_area(g.bbox) > 0]
+            
+            metrics_result = {}
+
+            # 1. 计算 QA 指标 (Text Generation)
+            if sample.gold_answer:
+                qa_score = self._compute_qa_metrics(pred_answer, sample.gold_answer)
+                metrics_result['qa'] = qa_score
+                total_metrics['qa_f1'] += qa_score['f1']
+                total_metrics['qa_em'] += qa_score['em']
+                counts['qa'] += 1
+
+            # 2. 计算 页面检索 指标 (Page Retrieval)
+            if sample.gold_pages:
+                page_score = self._compute_page_metrics(pred_elements, sample.gold_pages)
+                metrics_result['page'] = page_score
+                total_metrics['page_recall'] += page_score['recall']
+                total_metrics['page_precision'] += page_score['precision']
+                counts['page'] += 1
+
+            # 3. 计算 元素提取/检测 指标 (Element Detection - Integrated from eval.py)
+            # 无论是否有 GT，都需要计算（用于处理 False Positive）
+            
+            # Page Accuracy (Presence Check)
+            page_acc = self._compute_page_accuracy(pred_bboxes, gt_bboxes)
+            metrics_result['page_acc'] = page_acc
+            total_metrics['page_acc'] += page_acc
+            counts['page_acc'] += 1
+
+            if sample.gold_elements or pred_elements:
+                # IoU Min Strategy (Threshold=0.75 from eval.py logic)
+                min_p, min_r = self._compute_detection_metrics(pred_bboxes, gt_bboxes, iou_func=calc_iou_min, threshold=0.75)
+                min_f = calculate_f_beta(min_p, min_r, beta)
+                
+                # IoU Standard/EM Strategy (Threshold=0.6 from eval.py default, 0.7 in usage)
+                # 这里使用 0.6 作为默认标准阈值
+                em_p, em_r = self._compute_detection_metrics(pred_bboxes, gt_bboxes, iou_func=calc_iou_standard, threshold=0.6)
+                em_f = calculate_f_beta(em_p, em_r, beta)
+
+                elem_score = {
+                    'iou_min_precision': min_p, 'iou_min_recall': min_r, 'iou_min_f1': min_f,
+                    'iou_em_precision': em_p, 'iou_em_recall': em_r, 'iou_em_f1': em_f
+                }
+                metrics_result['element'] = elem_score
+                
+                total_metrics['element_min_f1'] += min_f
+                total_metrics['element_em_f1'] += em_f
+                counts['element'] += 1
+
+            # 存储回 sample
+            sample.extra_info['metrics'] = metrics_result
+
+        # --- 汇总平均值 ---
+        avg_results = {}
+        
+        # QA
+        if counts['qa'] > 0:
+            avg_results['avg_qa_f1'] = total_metrics['qa_f1'] / counts['qa']
+            avg_results['avg_qa_em'] = total_metrics['qa_em'] / counts['qa']
+        
+        # Page Retrieval
+        if counts['page'] > 0:
+            avg_results['avg_page_recall'] = total_metrics['page_recall'] / counts['page']
+            avg_results['avg_page_precision'] = total_metrics['page_precision'] / counts['page']
+        
+        # Element Detection
+        if counts['page_acc'] > 0:
+            avg_results['avg_page_acc'] = total_metrics['page_acc'] / counts['page_acc']
+            
+        if counts['element'] > 0:
+            avg_results['avg_element_min_f1'] = total_metrics['element_min_f1'] / counts['element']
+            avg_results['avg_element_em_f1'] = total_metrics['element_em_f1'] / counts['element']
+
+        return avg_results
+
     def load_data(self) -> None:
         """加载 MVToolBench JSON 数据并转换为 StandardSample 格式。"""
         if not os.path.exists(self.json_path):
