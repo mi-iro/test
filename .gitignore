@@ -6,3 +6,6 @@ MMLongBench-Doc/
 *results_*/
 RegionRAG/
 VisRAG/
+=10.1
+Qwen3-VL-Embedding/
+retrieved_labeled_results*

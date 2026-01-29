@@ -24,7 +24,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from scripts.qwen3_vl_embedding import Qwen3VLEmbedder
-from scripts.qwen3_vl_reranker import Qwen3VLReranker
+from scripts.qwen3_vl_reranker_client import Qwen3VLReranker
 from src.agents.ElementExtractor import ElementExtractor
 from src.utils.llm_helper import create_llm_caller
 
