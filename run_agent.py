@@ -67,6 +67,12 @@ def get_parser():
     parser.add_argument("--finrag_lang", type=str, default="ch", choices=["ch", "en", "bbox"])
     parser.add_argument("--force_rebuild_index", action="store_true")
 
+    # --- New Arguments ---
+    parser.add_argument("--use_page", action="store_true", help="Include full page image in context.")
+    parser.add_argument("--use_crop", action="store_true", help="Include element crop image in context.")
+    parser.add_argument("--use_ocr", action="store_true", help="Include OCR text in context.")
+    parser.add_argument("--use_ocr_raw", action="store_true", help="Use raw OCR content instead of Agent summary.")
+
     return parser
 
 def parse_args_with_config():
@@ -108,6 +114,7 @@ def main():
     print(f"🧵 Threads: {args.num_threads}")
     if args.agent_type == "standard":
         print(f"🔍 Top-K: {args.top_k}")
+        print(f"🖼️  Context Controls: Page={args.use_page}, Crop={args.use_crop}, OCR={args.use_ocr}, RawOCR={args.use_ocr_raw}")
     
     print("🛠️ Initializing Tools and Extractor...")
     tool = ImageZoomOCRTool(
@@ -197,6 +204,10 @@ def main():
             model_name=args.model_name,
             top_k=args.top_k,
             cache_dir=cache_dir,
+            use_page=args.use_page,
+            use_crop=args.use_crop,
+            use_ocr=args.use_ocr,
+            use_ocr_raw=args.use_ocr_raw,
         )
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")

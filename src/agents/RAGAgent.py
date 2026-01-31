@@ -11,6 +11,7 @@ from openai import OpenAI
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
+from src.agents.utils import MinerUBboxExtractor
 
 def local_image_to_data_url(path: str) -> str:
     """
@@ -65,6 +66,10 @@ class RAGAgent:
         model_name: str,
         top_k: int = 5,
         cache_dir: str = "./cache_results_rag",  # 新增缓存目录参数
+        use_page: bool = False,
+        use_crop: bool = True,
+        use_ocr: bool = True,
+        use_ocr_raw: bool = False,
         **kwargs
     ):
         """
@@ -74,6 +79,10 @@ class RAGAgent:
         :param model_name: 模型名称。
         :param top_k: 单次检索的证据数量。
         :param cache_dir: 结果缓存目录。
+        :param use_page: 是否在 Context 中包含整页图像。
+        :param use_crop: 是否在 Context 中包含 BBox 截图。
+        :param use_ocr: 是否在 Context 中包含 OCR 文本。
+        :param use_ocr_raw: 是否使用 raw_content (from MinerUBboxExtractor) 替代 Agent 总结的 content。
         """
         self.loader = loader
         self.client = OpenAI(base_url=base_url, api_key=api_key)
@@ -81,12 +90,18 @@ class RAGAgent:
         self.top_k = top_k
         self.cache_dir = cache_dir
         
+        self.use_page = use_page
+        self.use_crop = use_crop
+        self.use_ocr = use_ocr
+        self.use_ocr_raw = use_ocr_raw
+        
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir, exist_ok=True)
 
     def build_context_message(self, elements: List[PageElement]) -> List[Dict[str, Any]]:
         """
         将检索到的 PageElement 列表转换为多模态 Context 消息。
+        根据 use_page, use_crop, use_ocr, use_ocr_raw 控制包含的内容。
         """
         content_list = []
         content_list.append({"type": "text", "text": "Here is the retrieved context/evidence from the documents:\n"})
@@ -94,18 +109,38 @@ class RAGAgent:
         for i, el in enumerate(elements):
             content_list.append({"type": "text", "text": f"\n--- Evidence {i+1} ---\n"})
             
-            # 1. 优先展示证据截图 (Crop)，如果没有则展示全图或不展示图片
-            img_path = el.crop_path if el.crop_path else el.corpus_path
+            # 1. Page Image (整页图像)
+            if self.use_page:
+                page_path = el.corpus_path
+                if page_path and os.path.exists(page_path):
+                    img_url = local_image_to_data_url(page_path)
+                    if img_url:
+                        content_list.append({"type": "text", "text": "Page Image:\n"})
+                        content_list.append({"type": "image_url", "image_url": {"url": img_url}})
+
+            # 2. Crop Image (证据截图)
+            if self.use_crop:
+                # 只有当 crop_path 存在时才展示，不再回退到 corpus_path (因为 use_page 独立控制)
+                img_path = el.crop_path
+                if img_path and os.path.exists(img_path):
+                    img_url = local_image_to_data_url(img_path)
+                    if img_url:
+                        content_list.append({"type": "text", "text": "Region Crop:\n"})
+                        content_list.append({"type": "image_url", "image_url": {"url": img_url}})
             
-            # 为了节省 Token，如果 crop_path 存在且有效，才放入 Context
-            if img_path and os.path.exists(img_path):
-                img_url = local_image_to_data_url(img_path)
-                if img_url:
-                    content_list.append({"type": "image_url", "image_url": {"url": img_url}})
-            
-            # 2. 文本内容 (OCR 结果或段落文本)
-            if el.content:
-                content_list.append({"type": "text", "text": f"Text Content: {el.content}\n"})
+            # 3. Text Content (OCR / Summary)
+            if self.use_ocr:
+                text_content = ""
+                bbox_extractor = MinerUBboxExtractor()
+                # 如果请求 raw OCR 且元素具有 raw_content 属性
+                if self.use_ocr_raw:
+                    el.raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
+                    text_content = el.raw_content
+                else:
+                    text_content = el.content
+                
+                if text_content:
+                    content_list.append({"type": "text", "text": f"Text Content: {text_content}\n"})
         
         content_list.append({"type": "text", "text": "\n---------------------\n"})
         return content_list
@@ -139,7 +174,9 @@ class RAGAgent:
                         # 过滤掉非 PageElement 字段以防止报错
                         valid_keys = PageElement.__annotations__.keys()
                         filtered_dict = {k: v for k, v in el_dict.items() if k in valid_keys}
-                        restored_elements.append(PageElement(**filtered_dict))
+                        
+                        el_obj = PageElement(**filtered_dict)
+                        restored_elements.append(el_obj)
                     
                     sample.extra_info['retrieved_elements'] = restored_elements
                     return sample
@@ -200,7 +237,8 @@ class RAGAgent:
             if 'retrieved_elements' in sample.extra_info:
                 for el in sample.extra_info['retrieved_elements']:
                     if hasattr(el, 'to_dict'):
-                        elements_to_save.append(el.to_dict())
+                        el_d = el.to_dict()
+                        elements_to_save.append(el_d)
                     elif isinstance(el, dict):
                          elements_to_save.append(el)
 

@@ -19,6 +19,7 @@ class PageElement:
     bbox: List[int] = field(default_factory=list) 
     type: str = "text"          # 'text', 'table', 'image', 'chart' 等，可以是None
     content: str = ""                # 文本内容 (如果是纯图，可以是OCR结果或图像描述)
+    raw_content: str = ""
     corpus_id: str = "" # 元素所属页面ID
     corpus_path: str = ""
     
