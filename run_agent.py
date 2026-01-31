@@ -168,7 +168,7 @@ def main():
             extractor=extractor
         )
         loader.load_data()
-        # loader.samples = loader.samples[:3]
+        loader.samples = loader.samples[:3]
 
     loader.llm_caller = create_llm_caller()
 
