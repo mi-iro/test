@@ -162,7 +162,7 @@ def main():
                 st.info(f"**Query:**\n\n{data.get('query', 'N/A')}")
             with col2:
                 st.success(f"**Gold Answer:**\n\n{data.get('gold_answer', 'N/A')}")
-                st.warning(f"**Model Answer:**\n\n{data.get('model_answer', 'N/A')}")
+                st.warning(f"**Model Answer:**\n\n{ data.get('final_answer', data.get('model_answer','N/A')) }")
 
         # 显示对话
         st.header("💬 对话历史")

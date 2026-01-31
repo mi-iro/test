@@ -150,11 +150,11 @@ def main():
 
     elif args.benchmark == "finrag":
         print("📥 Loading FinRAGLoader...")
-        embedder = Qwen3VLEmbedder(model_name_or_path=args.embedding_model, torch_dtype=torch.float16)
+        # embedder = Qwen3VLEmbedder(model_name_or_path=args.embedding_model, torch_dtype=torch.float16)
         loader = FinRAGLoader(
             data_root=args.data_root,
             lang=args.finrag_lang,
-            embedding_model=embedder,
+            embedding_model=None,
             rerank_model=reranker,
             extractor=extractor
         )
@@ -168,7 +168,7 @@ def main():
             extractor=extractor
         )
         loader.load_data()
-        loader.samples = loader.samples[:3]
+        loader.samples = loader.samples[:20]
 
     loader.llm_caller = create_llm_caller()
 
@@ -264,7 +264,7 @@ def main():
                             "qid": sample.qid,
                             "query": sample.query,
                             "gold_answer": sample.gold_answer,
-                            "model_answer": sample.extra_info.get('final_answer'),
+                            "final_answer": sample.extra_info.get('final_answer'),
                             "metrics": sample_metrics,
                             "gold_pages": sample.gold_pages,
                             "retrieved_elements": [

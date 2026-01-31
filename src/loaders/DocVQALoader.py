@@ -3,9 +3,8 @@ import json
 import re
 import sys
 import uuid
-import torch
 import collections
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 from PIL import Image
 
 # 调整路径以确保可以从 src 和 scripts 导入
@@ -13,7 +12,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from src.agents.ElementExtractor import ElementExtractor
-from scripts.qwen3_vl_reranker import Qwen3VLReranker
 from src.utils.llm_helper import create_llm_caller
 
 # 复用 MMLongLoader 中的评分逻辑
@@ -22,17 +20,19 @@ from src.loaders.MMLongLoader import eval_score, MMLONG_EXTRACT_PROMPT_TEMPLATE
 class DocVQALoader(BaseDataLoader):
     """
     DocVQA 数据集加载器。
-    适配 top3_test.jsonl 格式，支持多图检索、ElementExtractor 抽取及 LLM 评估。
+    适配 top3_test.jsonl 格式，支持单图检索、ElementExtractor 抽取及 LLM 评估。
     """
     
-    def __init__(self, data_root: str, extractor: Optional[ElementExtractor] = None, rerank_model: Optional[Qwen3VLReranker] = None):
+    def __init__(self, data_root: str, extractor: Optional[ElementExtractor] = None, **kwargs):
+        """
+        :param data_root: 数据集根目录
+        :param extractor: ElementExtractor 实例
+        """
         super().__init__(data_root)
         self.extractor = extractor
-        self.reranker = rerank_model
         
         # DocVQA 特有路径适配
         self.jsonl_path = os.path.join(data_root, "top3_test.jsonl")
-        self.img_dir = os.path.join(data_root, "imgs")
         self.llm_caller = None
 
     def load_data(self) -> None:
@@ -51,10 +51,9 @@ class DocVQALoader(BaseDataLoader):
                 # DocVQA 的 answer 通常是列表
                 gold_answers = item.get("answer", [])
                 
-                # 图像路径处理：jsonl 中通常是相对路径如 "imgs/4.png"
-                # 根据 tree 结构，images 位于 data_root/imgs 下
-                images = item.get("image", [])
-                image_full_paths = [os.path.join(self.data_root, img) for img in images]
+                # 图像路径处理
+                images = item.get("posImgs", [])
+                image_full_paths = [os.path.join(self.data_root, "imgs", os.path.basename(img)) for img in images]
                 
                 # 正确答案所在的页面 (用于 Recall 评估)
                 pos_imgs = item.get("posImgs", [])
@@ -68,10 +67,7 @@ class DocVQALoader(BaseDataLoader):
                     gold_answer=gold_answers,
                     gold_elements=[],
                     gold_pages=gold_pages,
-                    extra_info={
-                        # "all_images": image_full_paths,
-                        # "is_sufficient": item.get("is_sufficient", True)
-                    }
+                    extra_info={}
                 )
                 self.samples.append(sample)
                 count += 1
@@ -80,12 +76,12 @@ class DocVQALoader(BaseDataLoader):
 
     def _extract_answer_with_llm(self, question: str, raw_response: str) -> Dict[str, Any]:
         """
-        参考 FinRAGLoader/MMLongLoader 的逻辑，利用 LLM 从自由文本分析中提取结构化答案。
+        利用 LLM 从自由文本分析中提取结构化答案。
         """
         if not self.llm_caller or not raw_response:
             return {"extracted_answer": raw_response, "answer_format": "String"}
             
-        # 构建 Prompt，要求模型输出：Extracted answer 和 Answer format
+        # 构建 Prompt
         prompt = MMLONG_EXTRACT_PROMPT_TEMPLATE.format(question=question, analysis=raw_response)
         
         try:
@@ -115,81 +111,116 @@ class DocVQALoader(BaseDataLoader):
             print(f"LLM 提取失败: {e}")
             return {"extracted_answer": raw_response, "answer_format": "String"}
 
-    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 3) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None, top_k = 10) -> List[PageElement]:
         """
         DocVQA 核心流水线：
-        1. 接收候选图片。
-        2. 如果提供了 reranker，对图片进行重排序。
-        3. 调用 ElementExtractor (Agent) 对 Top-K 图片进行视觉搜索和答案定位。
+        1. 接收指定图片（不进行重排序）。
+        2. 调用 ElementExtractor (Agent) 进行视觉搜索和答案定位。
+        3. 解析输出并裁剪证据区域。
         """
         if not image_paths: return []
+        if self.extractor is None:
+            print("Error: ElementExtractor is not initialized.")
+            return []
 
-        # 封装为 PageElement 格式以供 reranker 使用
-        candidate_pages = []
-        for img_path in image_paths:
-            candidate_pages.append(PageElement(
-                bbox=[0, 0, 1000, 1000],
-                type="page_image",
-                content="",
-                corpus_id=os.path.basename(img_path),
-                corpus_path=img_path,
-                crop_path=img_path
-            ))
-
-        # 1. Rerank
-        if self.reranker and len(candidate_pages) > top_k:
-            documents_input = [{"image": page.crop_path} for page in candidate_pages]
-            rerank_input = {
-                "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
-                "query": {"text": query},
-                "documents": documents_input
-            }
-            scores = self.reranker.process(rerank_input)
-            for page, score in zip(candidate_pages, scores):
-                page.retrieval_score = score
-            target_pages = sorted(candidate_pages, key=lambda x: x.retrieval_score, reverse=True)[:top_k]
-        else:
-            target_pages = candidate_pages[:top_k]
-
-        # 2. Element Extraction (Visual Grounding)
-        extracted_elements = []
+        # 准备工作目录用于保存裁剪图片
         workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
         os.makedirs(workspace_dir, exist_ok=True)
 
-        for page in target_pages:
+        extracted_elements = []
+
+        # 遍历每一张输入图片（通常只有一张）
+        for img_path in image_paths:
             try:
-                # 运行 Agent 寻找证据
+                # 运行 Agent (同步调用)
                 agent_output = self.extractor.run_agent(
                     user_text=query,
-                    image_paths=[page.corpus_path]
+                    image_paths=[img_path]
                 )
                 
                 if not agent_output or "predictions" not in agent_output:
                     continue
 
+                # 获取最后一条消息的内容
                 content = agent_output["predictions"][-1].get("content", "")
-                # 解析证据和坐标 (简化逻辑)
-                json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
-                if json_match:
-                    items = json.loads(json_match.group(1).strip())
-                    if isinstance(items, dict): items = [items]
-                    
-                    img = Image.open(page.corpus_path)
-                    w, h = img.size
-                    
-                    for item in items:
+                
+                # --- 增强的 JSON 解析逻辑 (参考 MMLongLoader) ---
+                extracted_data = []
+                try:
+                    json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1).strip()
+                    else:
+                        # 尝试寻找方括号
+                        start = content.find('[')
+                        end = content.rfind(']')
+                        if start != -1 and end != -1:
+                            json_str = content[start:end+1]
+                        else:
+                            json_str = "[]"
+                    extracted_data = json.loads(json_str)
+                except Exception:
+                    # 解析失败则跳过或视为空
+                    extracted_data = []
+
+                if isinstance(extracted_data, dict):
+                    extracted_data = [extracted_data]
+
+                # --- 处理图片裁剪与 PageElement 封装 ---
+                if isinstance(extracted_data, list):
+                    current_page_image = None
+                    img_w, img_h = 0, 0
+                    try:
+                        current_page_image = Image.open(img_path)
+                        img_w, img_h = current_page_image.size
+                    except Exception:
+                        pass
+
+                    for item in extracted_data:
                         bbox = item.get("bbox", [0, 0, 0, 0])
+                        evidence = item.get("evidence", "")
+                        
+                        # 验证 bbox 格式
+                        if not isinstance(bbox, list) or len(bbox) != 4:
+                            bbox = [0, 0, 0, 0]
+                        
+                        current_crop_path = img_path 
+                        
+                        # 执行裁剪 (Crop)
+                        if current_page_image and bbox != [0, 0, 0, 0]:
+                            try:
+                                x1, y1, x2, y2 = bbox
+                                # 坐标归一化转换 (假设 Agent 输出为 1000x1000 坐标系)
+                                x1 = int(x1 / 1000 * img_w)
+                                y1 = int(y1 / 1000 * img_h)
+                                x2 = int(x2 / 1000 * img_w)
+                                y2 = int(y2 / 1000 * img_h)
+                                
+                                x1 = max(0, x1); y1 = max(0, y1); x2 = min(img_w, x2); y2 = min(img_h, y2)
+                                
+                                if x2 > x1 and y2 > y1:
+                                    cropped_img = current_page_image.crop((x1, y1, x2, y2))
+                                    # 生成唯一文件名
+                                    filename = f"{os.path.basename(img_path).split('.')[0]}_{uuid.uuid4().hex[:8]}.jpg"
+                                    save_path = os.path.join(workspace_dir, filename)
+                                    cropped_img.save(save_path)
+                                    current_crop_path = save_path 
+                            except Exception as e:
+                                print(f"Crop failed: {e}")
+
+                        # 构造 PageElement
                         element = PageElement(
                             bbox=bbox,
                             type="evidence",
-                            content=item.get("evidence", ""),
-                            corpus_id=page.corpus_id,
-                            corpus_path=page.corpus_path,
-                            crop_path=page.corpus_path # 实际应用中可按 MMLongLoader 逻辑进行 Crop 保存
+                            content=evidence,
+                            corpus_id=os.path.basename(img_path),
+                            corpus_path=img_path,
+                            crop_path=current_crop_path
                         )
                         extracted_elements.append(element)
+
             except Exception as e:
-                print(f"Error extracting from {page.corpus_id}: {e}")
+                print(f"Error extracting from {img_path}: {e}")
 
         return extracted_elements
 
@@ -213,8 +244,8 @@ class DocVQALoader(BaseDataLoader):
             # 如果提供了 llm_caller，则先进行标准化提取
             if self.llm_caller and raw_pred:
                 extract_res = self._extract_answer_with_llm(sample.query, raw_pred)
+
                 final_pred = extract_res['extracted_answer']
-                # 将提取后的结果存入 extra_info 方便后续调试查看
                 sample.extra_info['extracted_answer_llm'] = final_pred
             else:
                 final_pred = raw_pred
@@ -226,7 +257,6 @@ class DocVQALoader(BaseDataLoader):
                 gold_list = gold_answers if isinstance(gold_answers, list) else [gold_answers]
                 
                 for gold in gold_list:
-                    # 调用 MMLongLoader.py 提供的 eval_score (内部包含 ANLS 逻辑)
                     s = eval_score(gold, final_pred, "String")
                     best_s = max(best_s, s)
                 
@@ -244,6 +274,7 @@ class DocVQALoader(BaseDataLoader):
 if __name__ == "__main__":
     # 使用示例
     data_root = "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-DocVQA"
+    # 注意：此处不需要 reranker
     loader = DocVQALoader(data_root=data_root)
     loader.load_data()
     
