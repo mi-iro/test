@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # 设置 CUDA 设备（如果需要指定显卡）
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # 设置端口
-PORT=8003
+PORT=8000
 HOST="0.0.0.0"
 
 echo "Starting Qwen-VL Reranker Service on ${HOST}:${PORT}..."

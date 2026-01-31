@@ -63,27 +63,24 @@ def main():
         st.sidebar.warning("该目录下没有找到JSON文件")
         st.stop()
 
-    # --- 核心修复：状态管理 ---
+    # --- 状态管理 ---
     
     # 1. 初始化索引
     if 'file_index' not in st.session_state:
         st.session_state.file_index = 0
 
-    # 2. 定义回调函数 (修复点：同时更新 index 和 selector 的值)
+    # 2. 定义回调函数
     def prev_file():
         if st.session_state.file_index > 0:
             st.session_state.file_index -= 1
-            # 强制同步更新下拉框的值
             st.session_state.file_selector = json_files[st.session_state.file_index]
 
     def next_file():
         if st.session_state.file_index < len(json_files) - 1:
             st.session_state.file_index += 1
-            # 强制同步更新下拉框的值
             st.session_state.file_selector = json_files[st.session_state.file_index]
 
     def on_selector_change():
-        # 当用户手动选择下拉框时，反向更新 index
         selected = st.session_state.file_selector
         if selected in json_files:
             st.session_state.file_index = json_files.index(selected)
@@ -102,10 +99,7 @@ def main():
     with col_next:
         st.button("➡️", on_click=next_file, disabled=(st.session_state.file_index == len(json_files) - 1))
 
-    # 4. 文件选择框 (绑定 key 和 on_change)
-    # 注意：这里去掉了 index 参数，完全依赖 session_state['file_selector'] 来控制选中项
-    
-    # 首次加载或 key 不存在时，初始化 selectbox 的值
+    # 4. 文件选择框
     if 'file_selector' not in st.session_state:
         st.session_state.file_selector = json_files[st.session_state.file_index]
 
@@ -113,8 +107,8 @@ def main():
         "跳转到文件:", 
         json_files,
         format_func=lambda x: os.path.relpath(x, base_dir),
-        key='file_selector',      # 绑定 key
-        on_change=on_selector_change # 绑定手动变更的回调
+        key='file_selector',
+        on_change=on_selector_change
     )
     
     st.sidebar.markdown("---")
@@ -125,15 +119,50 @@ def main():
         if not data:
             st.stop()
             
-        # 显示基础信息
-        with st.expander("📝 基础信息 (Query & Answer)", expanded=True):
+        # [修改点 1]：更新了标题，包含指标
+        with st.expander("📝 基础信息 & 评估指标 (Metrics & Info)", expanded=True):
+            
+            # [修改点 2]：新增 Metrics 可视化展示
+            metrics = data.get("metrics", {})
+            if metrics:
+                st.markdown("### 📊 核心指标")
+                m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
+                
+                # Model Eval: 根据数值显示不同颜色（可选优化）
+                eval_score = metrics.get('model_eval', 0)
+                delta_color = "normal"
+                if isinstance(eval_score, (int, float)):
+                    delta_color = "off" if eval_score == 0 else "inverse" # 0为灰色/红色，1为绿色
+
+                with m1:
+                    st.metric(
+                        label="Model Eval (评估结果)", 
+                        value=eval_score,
+                        help="0: Incorrect, 1: Correct"
+                    )
+                with m2:
+                    st.metric(
+                        label="Page Recall (页面召回)", 
+                        value=f"{metrics.get('page_recall', 0):.2%}" if isinstance(metrics.get('page_recall'), (int, float)) else metrics.get('page_recall', 'N/A'),
+                        help="Retrieved Pages / Gold Pages"
+                    )
+                with m3:
+                    st.metric(
+                        label="Page Precision (页面精度)", 
+                        value=f"{metrics.get('page_precision', 0):.2%}" if isinstance(metrics.get('page_precision'), (int, float)) else metrics.get('page_precision', 'N/A'),
+                        help="Correct Pages / Retrieved Pages"
+                    )
+                
+                st.divider() # 分割线，将指标与文本信息分开
+
+            # 原有的 Q&A 展示
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**QID:** `{data.get('qid', 'N/A')}`")
                 st.info(f"**Query:**\n\n{data.get('query', 'N/A')}")
             with col2:
                 st.success(f"**Gold Answer:**\n\n{data.get('gold_answer', 'N/A')}")
-                st.warning(f"**Final Answer:**\n\n{data.get('final_answer', 'N/A')}")
+                st.warning(f"**Model Answer:**\n\n{data.get('model_answer', 'N/A')}")
 
         # 显示对话
         st.header("💬 对话历史")

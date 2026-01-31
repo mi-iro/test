@@ -144,7 +144,7 @@ async def startup_event():
                 "is_original_qwen3_reranker": True,
             },
             # 限制显存使用，防止 OOM (可选)
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.7,
         )
         print("Model initialized successfully!")
     except Exception as e:

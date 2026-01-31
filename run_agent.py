@@ -4,15 +4,13 @@ import sys
 import torch
 import json
 import yaml
-import concurrent.futures  # <--- 新增
-import traceback          # <--- 新增，用于打印线程报错堆栈
-from tqdm import tqdm     # <--- 新增
+import concurrent.futures
+import traceback
+from tqdm import tqdm
 from PIL import Image
 
-# 确保项目根目录在 sys.path 中
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-# --- 引入两个 Agent ---
 from src.agents.AgenticRAGAgent import AgenticRAGAgent
 from src.agents.RAGAgent import RAGAgent
 
@@ -20,6 +18,7 @@ from src.agents.ElementExtractor import ElementExtractor
 from src.agents.utils import ImageZoomOCRTool
 from src.loaders.MMLongLoader import MMLongLoader
 from src.loaders.FinRAGLoader import FinRAGLoader
+from src.loaders.DocVQALoader import DocVQALoader
 from src.utils.llm_helper import create_llm_caller
 
 try:
@@ -31,54 +30,40 @@ except ImportError:
 def get_parser():
     parser = argparse.ArgumentParser(description="Run RAG Evaluation (Agentic or Standard).")
 
-    # ------------------ 核心控制参数 ------------------
     parser.add_argument("--agent_type", type=str, default="standard", choices=["agentic", "standard"], 
                         help="Choose the type of agent: 'agentic' (ReAct loop) or 'standard' (One-pass RAG).")
     parser.add_argument("--top_k", type=int, default=10, 
                         help="Top-K Parameter.")
-    # -------------------------------------------------------
-
-    # 多线程配置 (新增)
     parser.add_argument("--num_threads", type=int, default=1, 
                         help="Number of threads for parallel processing. Default is 1 (sequential).")
 
-    # 配置文件路径
     parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file.")
-    # 推理模式开关
     parser.add_argument("--infer_only", action="store_true", help="Skip evaluation step.")
 
-    # 基础配置
     parser.add_argument("--benchmark", type=str, default="mmlong", choices=["mmlong", "finrag"], help="Target benchmark.")
     parser.add_argument("--data_root", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/MMLongBench-Doc", help="Dataset root.")
     parser.add_argument("--output_dir", type=str, default="./results_rag", help="Directory to save results.")
     
-    # LLM 配置
     parser.add_argument("--model_name", type=str, default="qwen2.5-72b-instruct", help="LLM model name.")
     parser.add_argument("--base_url", type=str, default="http://localhost:3888/v1", help="LLM API Base URL.")
     parser.add_argument("--api_key", type=str, default="sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR", help="LLM API Key.")
     
-    # Agentic RAG 特有配置
     parser.add_argument("--max_rounds", type=int, default=5, help="Max thinking rounds (Only for Agentic RAG).")
     
-    # 测试限制
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples.")
 
-    # 模型路径 (FinRAG / Reranker)
     parser.add_argument("--embedding_model", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Embedding-8B")
     parser.add_argument("--reranker_model", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B")
     
-    # Reranker Remote
     parser.add_argument("--reranker_api_base", type=str, default=None, help="vLLM API Base URL for Reranker.")
     parser.add_argument("--reranker_api_key", type=str, default="EMPTY")
     
-    # MinerU / Extractor
     parser.add_argument("--mineru_server_url", type=str, default="http://10.102.98.181:8000/")
     parser.add_argument("--mineru_model_path", type=str, default="/root/checkpoints/MinerU2.5-2509-1.2B/")
     parser.add_argument("--extractor_model_name", type=str, default="MinerU-Agent-CK300")
     parser.add_argument("--extractor_base_url", type=str, default="http://localhost:8001/v1")
     parser.add_argument("--extractor_api_key", type=str, default="sk-123456")
 
-    # FinRAG 特有
     parser.add_argument("--finrag_lang", type=str, default="ch", choices=["ch", "en", "bbox"])
     parser.add_argument("--force_rebuild_index", action="store_true")
 
@@ -97,13 +82,7 @@ def parse_args_with_config():
     return args
 
 def process_single_sample_safe(agent, sample, index, total):
-    """
-    单个样本处理的包装函数，用于线程池调用。
-    包含异常捕获，防止单个样本报错导致整个进程崩溃。
-    """
     try:
-        # 简单的进度日志（多线程下可能乱序，主要用于Debug）
-        # print(f"[Thread-Start] Processing QID: {sample.qid}")
         agent.process_sample(sample)
         return True
     except Exception as e:
@@ -114,14 +93,12 @@ def process_single_sample_safe(agent, sample, index, total):
 def main():
     args = parse_args_with_config()
 
-    # 1. 目录准备
     os.makedirs(args.output_dir, exist_ok=True)
     workspace_dir = os.path.join(args.output_dir, "workspace")
     cache_dir = os.path.join(args.output_dir, "cache")
     os.makedirs(workspace_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
 
-    # 保存配置
     config_path = os.path.join(args.output_dir, f"config_{args.agent_type}.yaml")
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(vars(args), f, default_flow_style=False, allow_unicode=True)
@@ -132,7 +109,6 @@ def main():
     if args.agent_type == "standard":
         print(f"🔍 Top-K: {args.top_k}")
     
-    # 2. 初始化底层工具 (Extractor & Reranker)
     print("🛠️ Initializing Tools and Extractor...")
     tool = ImageZoomOCRTool(
         work_dir=os.path.join(workspace_dir, "crops"),
@@ -148,16 +124,13 @@ def main():
     )
 
     reranker = None
-    # 修改开始：根据示例调整 Reranker 的初始化逻辑
     if args.reranker_api_base:
-        # 远程模式：直接将服务地址传入 model_name_or_path
         print("🛠️ Initializing Reranker (REMOTE Mode)...")
         print(f"   Address: {args.reranker_api_base}")
         reranker = Qwen3VLReranker(
             model_name_or_path=args.reranker_api_base
         )
     elif args.reranker_model:
-        # 本地模式：传入本地权重路径
         print("🛠️ Initializing Reranker (LOCAL Mode)...")
         print(f"   Model Path: {args.reranker_model}")
         reranker = Qwen3VLReranker(
@@ -165,7 +138,6 @@ def main():
             torch_dtype=torch.float16
         )
 
-    # 3. 初始化 DataLoader
     loader = None
     if args.benchmark == "mmlong":
         print("📥 Loading MMLongLoader...")
@@ -187,6 +159,16 @@ def main():
             extractor=extractor
         )
         loader.load_data()
+        
+    elif args.benchmark == "docvqa":
+        print("📥 Loading DocVQALoader...")
+        loader = DocVQALoader(
+            data_root=args.data_root,
+            rerank_model=reranker,
+            extractor=extractor
+        )
+        loader.load_data()
+        # loader.samples = loader.samples[:3]
 
     loader.llm_caller = create_llm_caller()
 
@@ -194,7 +176,6 @@ def main():
         print(f"⚠️ Limiting samples to {args.limit}.")
         loader.samples = loader.samples[:args.limit]
 
-    # 4. 初始化 Agent (根据类型)
     agent = None
     if args.agent_type == "agentic":
         print(f"🧠 Initializing AgenticRAGAgent (ReAct, Max Rounds: {args.max_rounds})...")
@@ -220,7 +201,6 @@ def main():
     else:
         raise ValueError(f"Unknown agent type: {args.agent_type}")
 
-    # 5. 执行处理循环 (支持多线程)
     print("\n⚡ Starting Processing Loop...")
     
     total_samples = len(loader.samples)
@@ -228,32 +208,26 @@ def main():
     if args.num_threads > 1:
         print(f"🔥 Parallel execution enabled with {args.num_threads} threads.")
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_threads) as executor:
-            # 提交任务
             future_to_sample = {
                 executor.submit(process_single_sample_safe, agent, sample, i, total_samples): sample 
                 for i, sample in enumerate(loader.samples)
             }
             
-            # 使用 tqdm 显示进度
             for future in tqdm(concurrent.futures.as_completed(future_to_sample), total=total_samples, desc="Processing"):
                 sample = future_to_sample[future]
                 try:
-                    future.result() # 这里会抛出 process_single_sample_safe 中未捕获的异常（虽然我们在函数内捕获了大部分）
+                    future.result() 
                 except Exception as exc:
                     print(f"Sample {sample.qid} generated an exception: {exc}")
     else:
-        # 单线程模式 (保持原有逻辑，便于调试)
         print("🐢 Sequential execution (Single Thread).")
         for i, sample in enumerate(tqdm(loader.samples, desc="Processing")):
-            # print(f"[{i+1}/{total_samples}] Processing Sample QID: {sample.qid}") # 使用tqdm后可以减少print
             agent.process_sample(sample)
 
-    # 6. 保存结果 (文件名区分 Agent 类型)
     excel_path = os.path.join(args.output_dir, f"{args.benchmark}_{args.agent_type}_results.xlsx")
     json_path = os.path.join(args.output_dir, f"{args.benchmark}_{args.agent_type}_results.json")
     agent.save_results(excel_path=excel_path, json_path=json_path)
 
-    # 7. 执行评估
     if args.infer_only:
         print("\n⏭️  Skipping Evaluation (Infer Only).")
     else:
@@ -264,8 +238,80 @@ def main():
             with open(metrics_path, "w", encoding="utf-8") as f:
                 json.dump(metrics, f, indent=2)
             print(f"✅ Evaluation complete. Metrics saved to {metrics_path}")
+
+            # ================== 修改开始 ==================
+            # 1. 准备错误分析目录
+            error_analysis_dir = os.path.join(args.output_dir, "error_cases")
+            os.makedirs(error_analysis_dir, exist_ok=True)
+            
+            print("🔍 Post-Eval: Saving error cases and updating cache with metrics...")
+            
+            count_updated = 0
+            count_errors = 0
+            
+            for sample in loader.samples:
+                # 获取 evaluate 阶段存入的 metrics 字典
+                sample_metrics = sample.extra_info.get('metrics', {})
+                
+                # A. 保存 model_eval 为错的样本
+                # model_eval: 1 为正确，0 为错误
+                if 'model_eval' in sample_metrics and sample_metrics['model_eval'] == 0:
+                    try:
+                        error_file = os.path.join(error_analysis_dir, f"{sample.qid}_error.json")
+                        
+                        # 构造详细的错误分析数据
+                        dump_data = {
+                            "qid": sample.qid,
+                            "query": sample.query,
+                            "gold_answer": sample.gold_answer,
+                            "model_answer": sample.extra_info.get('final_answer'),
+                            "metrics": sample_metrics,
+                            "gold_pages": sample.gold_pages,
+                            "retrieved_elements": [
+                                el.to_dict() if hasattr(el, 'to_dict') else el 
+                                for el in sample.extra_info.get('retrieved_elements', [])
+                            ],
+                            "messages": sample.extra_info.get('messages', [])
+                        }
+                        
+                        with open(error_file, 'w', encoding='utf-8') as f:
+                            json.dump(dump_data, f, ensure_ascii=False, indent=2)
+                        count_errors += 1
+                    except Exception as e:
+                        print(f"Error saving error case for {sample.qid}: {e}")
+
+                # B. 将 page_recall 和 page_precision 等指标更新回缓存文件
+                # 只有当 metrics 中确实包含 page_recall 等信息时才更新
+                if agent and hasattr(agent, 'cache_dir'):
+                    cache_file_path = os.path.join(agent.cache_dir, f"{sample.qid}.json")
+                    if os.path.exists(cache_file_path):
+                        try:
+                            with open(cache_file_path, 'r', encoding='utf-8') as f:
+                                cache_data = json.load(f)
+                            
+                            # 更新数据
+                            # 1. 保存整个 metrics 字典
+                            cache_data['metrics'] = sample_metrics
+                            
+                            # 2. 显式提取 page_recall / page_precision 到顶层或 metrics 层
+                            # (根据需求，这里存在 cache_data['metrics'] 里即可，或者您可以根据需要提到顶层)
+                            cache_data['page_recall'] = sample_metrics.get('page_recall', 0.0)
+                            cache_data['page_precision'] = sample_metrics.get('page_precision', 0.0)
+                            cache_data['model_eval'] = sample_metrics.get('model_eval', 0)
+
+                            with open(cache_file_path, 'w', encoding='utf-8') as f:
+                                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                            count_updated += 1
+                        except Exception as e:
+                            print(f"Error updating cache for {sample.qid}: {e}")
+
+            print(f"✅ Saved {count_errors} error cases to {error_analysis_dir}")
+            print(f"✅ Updated {count_updated} cache files with evaluation metrics.")
+            # ================== 修改结束 ==================
+
         except Exception as e:
             print(f"❌ Evaluation failed: {e}")
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()

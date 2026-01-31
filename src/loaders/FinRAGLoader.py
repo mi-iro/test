@@ -42,7 +42,11 @@ def encode_image_to_base64(image_path):
 
 def extract_pdf_prefix(filename):
     """
-    从图片文件名中提取PDF原始前缀，移除页码后缀（如 _116.png-2）
+    从图片文件名中提取PDF原始前缀，移除页码后缀。
+    
+    支持以下格式后缀：
+    1. _116.png-3  (标准单页)
+    2. _multipage_163-164.png-3 (多页合并)
     
     Args:
         filename (str): 待处理的文件名字符串
@@ -50,16 +54,23 @@ def extract_pdf_prefix(filename):
     Returns:
         str: 提取后的前缀。如果匹配失败，则返回原字符串。
     """
-    # 逻辑：匹配从开头直到最后一个“_数字.png”之前的内容
+    # 修改后的正则逻辑：
     # ^       : 匹配开头
-    # (.*)    : 捕获组，匹配前缀
-    # (?=     : 正向预查（不计入结果）
-    # _\d+    : 下划线后跟一个或多个数字（页码）
-    # \.png   : 匹配 .png 扩展名
-    pattern = r"^(.*)(?=_\d+\.png)"
+    # (.*)    : 捕获组，匹配前缀（贪婪匹配）
+    # (?=     : 正向预查开始（遇到以下内容即停止捕获，但不消耗字符）
+    #   (?:   : 非捕获组，用于逻辑“或”
+    #     _\d+\.png   : 匹配标准格式（下划线+数字+.png），例如 _116.png
+    #     |           : 或者
+    #     _multipage  : 匹配多页标记（_multipage），例如 _multipage_163...
+    #   )
+    # )
+    pattern = r"^(.*)(?=(?:_\d+\.png|_multipage))"
     
     match = re.search(pattern, filename)
-    return match.group(1) if match else filename
+    
+    if match:
+        return match.group(1)
+    return filename
 
 class FinRAGLoader(BaseDataLoader):
     def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
@@ -461,39 +472,110 @@ class FinRAGLoader(BaseDataLoader):
     # --------------------------------------------------------------------------------
     # Evaluation Methods (Modified to ONLY use Model Eval)
     # --------------------------------------------------------------------------------
-
     def _evaluate_answer_correctness(self, sample: StandardSample) -> Dict[str, Any]:
         """
-        MODIFIED: 强制对所有类型的样本使用 LLM 进行正确性评估 (Model Eval)。
-        忽略 answer_type (short/long) 的区别。
+        完善后的模型评估逻辑：
+        1. 解析 1-5 分制。
+        2. 将分数映射到 0-1 区间或保留原始分。
+        3. 增加鲁棒的正规表达式解析。
         """
+        import re
         query_text = sample.query
         expected_answer = sample.gold_answer
-        actual_answer = sample.extra_info.get('final_answer', "error output") if sample.extra_info else "error output"
+        # 兼容性处理：防止 NoneType 报错
+        actual_answer = (sample.extra_info.get('final_answer') 
+                        if sample.extra_info else None) or "error output"
 
-        model_eval = 0
+        model_score = 0.0
+        reasoning = "No reasoning provided."
 
-        # 如果没有 LLM Caller 或答案为空，直接判定为 0
-        if "error output" in actual_answer or not self.llm_caller:
-            model_eval = 0
-        else:
-            # 统一构建 Prompt，不区分长短答案
-            evaluation_prompt = (
-                f"Question: {query_text}\n"
-                f"Ground_truth: {expected_answer}\n"
-                f"Model_answer: {actual_answer}\n"
-                f"Is the model answer correct? You only need to output 'true' for correct or 'false' for incorrect. "
-                f"If the model answer does not contain any information, it should be judged as 'false'."
-            )
-            try:
-                response_core = self.llm_caller(evaluation_prompt)
-                model_eval = 1 if "true" in response_core.lower() else 0
-            except Exception as e:
-                print(f"Error during model eval for QID {sample.qid}: {e}")
-                model_eval = 0
+        if not actual_answer or "error output" in actual_answer or not self.llm_caller:
+            return {"model_eval": 0.0, "raw_score": 1, "eval_reason": "Invalid answer or missing LLM"}
+
+        # 保持您原有的高效 Prompt 模板
+        evaluation_prompt = f"""You are an expert evaluation system for a question answering chatbot.
+
+You are given the following information:
+- a user query and reference answer
+- a generated answer
+
+Your job is to judge the relevance and correctness of the generated answer.
+Output a single score that represents a holistic evaluation.
+You must return your response in a line with only the score.
+Do not return answers in any other format.
+On a separate line provide your reasoning before the score as well.
+
+Follow these guidelines for scoring:
+- Your score has to be between 1 and 5, where 1 is the worst and 5 is the best.
+- If the generated answer is not relevant to the user query, you should give a score of 1.
+- If the generated answer is relevant but contains factual errors or significant hallucinations, you should give a score between 2 and 3.
+- If the generated answer is relevant and fully correct according to the reference, you should give a score between 4 and 5.
+
+**Special Instruction for Open-Ended Questions:**
+- If the user query is open-ended (allowing for multiple valid answers), the generated answer DOES NOT need to match the reference answer exactly.
+- As long as the generated answer is highly relevant and contains no factual conflicts with the reference, give a high score.
+
+**Special Instruction for Numerical and Logical Equivalence:**
+- If the generated answer represents the **same value or concept** as the reference answer but in a different format, unit, or perspective, it MUST be considered CORRECT.
+- **Unit Conversion:** (e.g., Reference: "1 kilometer", Generated: "1000 meters" -> Correct).
+- **Format Differences:** (e.g., Reference: "0.5", Generated: "50%" or "1/2" -> Correct).
+- **Absolute vs. Relative:** If the generated answer uses a relative value (e.g., percentage) while the reference uses an absolute value (or vice versa), and they are mathematically consistent based on the context, treat it as correct.
+- You should perform necessary mental calculations to verify if the generated answer can be derived from the reference or the reference can be derived from the generated answer.
+
+Example Response:
+REASON: The generated answer uses '500 meters' while the reference says '0.5 km'. These are mathematically equivalent, so the answer is correct.
+SCORE: 5
+
+User:
+## User Query
+{query_text}
+
+## Reference Answer
+{expected_answer}
+
+## Generated Answer
+{actual_answer}
+"""
+
+        try:
+            response_text = self.llm_caller(evaluation_prompt)
+            
+            # --- 解析逻辑优化 ---
+            
+            # 1. 提取分数 (匹配 SCORE: 5 或直接匹配行尾数字)
+            score_match = re.search(r"SCORE:\s*(\d+)", response_text, re.IGNORECASE)
+            if not score_match:
+                # 备选方案：尝试匹配最后一行出现的数字
+                score_match = re.search(r"(\d+)\s*$", response_text.strip())
+                
+            # 2. 提取原因
+            reason_match = re.search(r"REASON:\s*(.*)", response_text, re.IGNORECASE)
+            if reason_match:
+                reasoning = reason_match.group(1).strip()
+
+            if score_match:
+                raw_score = int(score_match.group(1))
+                # 限制分数范围在 1-5
+                raw_score = max(1, min(5, raw_score))
+                
+                # 3. 映射逻辑：
+                # 如果您需要 binary (0/1) 结果：通常 4-5 分算对(1.0)，1-3 分算错(0.0)
+                model_score = 1.0 if raw_score >= 4 else 0.0
+                
+                # 如果您需要连续分值 (0, 0.25, 0.5, 0.75, 1.0)：
+                # model_score = (raw_score - 1) / 4.0
+            else:
+                print(f"Warning: Could not parse score from response for QID {sample.qid}")
+                model_score = 0.0
+
+        except Exception as e:
+            print(f"Error during model eval for QID {sample.qid}: {e}")
+            model_score = 0.0
 
         return {
-            "model_eval": model_eval
+            "model_eval": model_score,  # 用于计算平均准确率
+            "raw_score": raw_score if 'raw_score' in locals() else 1,
+            "eval_reason": reasoning
         }
 
     def _check_images_entailment(self, elements: List[PageElement], answer: str) -> bool:
@@ -590,6 +672,7 @@ class FinRAGLoader(BaseDataLoader):
     def evaluate(self) -> Dict[str, float]:
         """
         执行评估：包含模型回答、页面检索指标和元素提取指标。
+        **修改点：将每个样本的具体指标存储到 extra_info['metrics'] 中。**
         """        
         total_metrics = {
             "model_eval": 0,
@@ -606,14 +689,17 @@ class FinRAGLoader(BaseDataLoader):
             if sample.extra_info is None:
                 sample.extra_info = {}
             
+            # --- 初始化单样本指标字典 ---
+            sample_metrics = {}
+
             # 1. 模型答案准确性 (LLM Judge)
             corr_metrics = self._evaluate_answer_correctness(sample)
             total_metrics['model_eval'] += corr_metrics['model_eval']
+            sample_metrics.update(corr_metrics) # Store: model_eval
             counts['total'] += 1
 
             # 获取预测的元素列表
             retrieved_elements = sample.extra_info.get('retrieved_elements', [])
-            # 统一转为 PageElement 对象以使用其属性
             elements_obj = []
             for el in retrieved_elements:
                 if isinstance(el, dict):
@@ -624,23 +710,28 @@ class FinRAGLoader(BaseDataLoader):
                      elements_obj.append(el)
 
             # 2. 页面指标计算 (Page Precision/Recall)
-            # gold_pages 通常存在于 sample.gold_pages 或 extra_info['from_pages']
             target_gold_pages = sample.gold_pages if sample.gold_pages else sample.extra_info.get('from_pages', [])
             if target_gold_pages:
                 page_res = self._compute_page_metrics(elements_obj, target_gold_pages)
                 total_metrics['page_recall'] += page_res['recall']
                 total_metrics['page_precision'] += page_res['precision']
+                # Store: page_recall, page_precision
+                sample_metrics.update({"page_recall": page_res['recall'], "page_precision": page_res['precision']})
                 counts['page'] += 1
 
             # 3. 元素指标计算 (BBox Precision/Recall/F1)
-            # 只有当样本包含标注的 gold_elements 时才进行统计
             if sample.gold_elements:
                 elem_res = self._compute_element_metrics(elements_obj, sample.gold_elements)
                 if elem_res:
                     total_metrics['element_recall'] += elem_res['element_recall']
                     total_metrics['element_precision'] += elem_res['element_precision']
                     total_metrics['element_f1'] += elem_res['element_f1']
+                    # Store: element_recall, element_precision, element_f1
+                    sample_metrics.update(elem_res)
                     counts['element'] += 1
+
+            # --- 将计算好的指标存入 extra_info ---
+            sample.extra_info['metrics'] = sample_metrics
 
         # 计算平均分
         avg_results = {}

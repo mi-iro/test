@@ -50,31 +50,37 @@ class Qwen3VLReranker:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # 保留原有的参数定义，确保命令行调用不报错
-    parser.add_argument("--model_name_or_path", type=str, default='http://localhost:8003')
+    parser.add_argument("--model_name_or_path", type=str, default='http://localhost:8000')
     args, _ = parser.parse_known_args()
 
     # 初始化 Reranker (Client模式)
     reranker = Qwen3VLReranker(model_name_or_path=args.model_name_or_path)
 
     # 测试输入数据 (保持与原文件一致)
-    test_inputs = {
-        "instruction": "Retrieve images or text relevant to the user's query.",
-        "query": {
-            "text": "A woman playing with her dog on a beach at sunset."
+    docs = [
+        {
+            "text": "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
         },
-        "documents": [
-            {
-                "text": "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
-            },
-            {
-                # 注意：确保服务器端能访问此路径，或者使用 URL
-                "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
-            },
-            {
-                "text": "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust.",
-                "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
-            }
-        ],
+        {
+            # 注意：确保服务器端能访问此路径，或者使用 URL
+            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
+        },
+        {
+            "text": "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust.",
+            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
+        }
+    ]
+    
+    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/FATF：2024年萨尔瓦多打击洗钱和恐怖主义融资的措施报告（英文版）_{i}.png"} for i in range(1,203)]
+    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/PROXY Print Set FINAL (no blank pages) pdfs_Current_Folio_Proxy_tmbsf_v3_F_{i}.png"} for i in range(1,68)]
+    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/巩固复苏：抓住绿色增长机会（英文版）_{i}.png"} for i in range(1,26)]
+    
+    test_inputs = {
+        "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
+        "query": {
+            "text": "Based on the commodity prices of Emerging Market Bond Index (EMBI) Global Sovereign Spreads, which commodity is the highest on 7-March-2022?"
+        },
+        "documents": docs,
         "fps": 1.0
     }
 
