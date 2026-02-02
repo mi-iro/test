@@ -18,6 +18,7 @@ from src.agents.ElementExtractor import ElementExtractor
 from src.agents.utils import ImageZoomOCRTool
 from src.loaders.MMLongLoader import MMLongLoader
 from src.loaders.FinRAGLoader import FinRAGLoader
+from src.loaders.ViDoSeekPoolLoader import ViDoSeekLoader
 from src.loaders.DocVQALoader import DocVQALoader
 from src.utils.llm_helper import create_llm_caller
 
@@ -180,7 +181,18 @@ def main():
             extractor=extractor
         )
         loader.load_data()
-        loader.samples = loader.samples[:20]
+    elif args.benchmark == "vidoseek":
+        print("📥 Loading ViDoSeekLoader...")
+        embedder = Qwen3VLEmbedder(model_name_or_path=args.embedding_model, torch_dtype=torch.float16)
+        loader = ViDoSeekLoader(
+            data_root=args.data_root,
+            embedding_model=embedder,
+            rerank_model=reranker,
+            extractor=extractor,
+        )
+        loader.load_data()
+    else:
+        raise NotImplementedError
 
     loader.llm_caller = create_llm_caller()
 
@@ -190,18 +202,7 @@ def main():
 
     agent = None
     if args.agent_type == "agentic":
-        print(f"🧠 Initializing AgenticRAGAgent (ReAct, Max Rounds: {args.max_rounds})...")
-        agent = AgenticRAGAgent(
-            loader=loader,
-            base_url=args.base_url,
-            api_key=args.api_key,
-            model_name=args.model_name,
-            top_k=args.top_k,
-            cache_dir=cache_dir,
-            max_rounds=args.max_rounds,
-            trunc_thres=args.trunc_thres, # [Added]
-            trunc_bbox=args.trunc_bbox    # [Added]
-        )
+        raise NotImplementedError
     elif args.agent_type == "standard":
         print(f"📜 Initializing RAGAgent (Standard, Top-K: {args.top_k})...")
         agent = RAGAgent(

@@ -383,7 +383,7 @@ class ViDoSeekLoader(BaseDataLoader):
             
         return fine_grained_elements
 
-    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 5) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10, trunc_thres=0.0, trunc_bbox=False) -> List[PageElement]:
         """Full RAG Pipeline"""
         # 1. Retrieve (Expand search space for reranking)
         pages = self.retrieve(query, top_k=top_k*4)
@@ -393,11 +393,12 @@ class ViDoSeekLoader(BaseDataLoader):
         ranked_pages = ranked_pages[:top_k]
         
         # Filter low scores
-        ranked_pages = [p for p in ranked_pages if getattr(p, 'retrieval_score', 0) >= 0.1]
+        ranked_pages = [ page for page in ranked_pages if page.retrieval_score >= trunc_thres]
 
         # 3. Extract Elements
         elements = self.extract_elements_from_pages(ranked_pages, query)
-        elements = elements[:top_k]
+        if trunc_bbox:
+            elements = elements[:top_k]
         
         # 如果没有提取到细粒度元素，回退到页面级
         if not elements and ranked_pages:
@@ -547,7 +548,7 @@ if __name__ == "__main__":
     extractor = ElementExtractor(
         base_url="http://localhost:8001/v1",
         api_key="sk-123456",
-        model_name="MinerU-Agent-CK300",
+        model_name="MinerU-Agent-CK800",
         tool=tool
     )
 
@@ -565,14 +566,12 @@ if __name__ == "__main__":
     # 建立索引 (扫描 imgs 目录)
     loader.build_page_vector_pool(batch_size=1)
     
-    exit(0)
-    
     if len(loader.samples) > 0:
         test_sample = loader.samples[0]
         print(f"\nTesting Query: {test_sample.query}")
         
         # 运行 pipeline
-        results = loader.pipeline(test_sample.query, top_k=2) 
+        results = loader.pipeline(test_sample.query) 
         
         # 模拟生成
         test_sample.extra_info['final_answer'] = "Generated Answer Placeholder"
