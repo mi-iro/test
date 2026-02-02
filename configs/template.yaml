@@ -24,9 +24,9 @@ defs:
     # 使用变量拼接完整路径
     qwen_root:    "${defs.roots.mineru3}/wangzhengren/JIT-RAG/assets/Qwen"
     finrag_root:  "${defs.roots.mineru2}/jiayu/data/FinRAGBench-V"
-    docvqa_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-DocVQA"
-    mmlong_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/MMLongBench-Doc"
-    vidoseek_root: "${defs.roots.mineru3}/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-ViDoSeek"
+    mmlong_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/data/MMLongBench-Doc"
+    docvqa_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/data/VisRAG/data/EVisRAG-Test-DocVQA"
+    vidoseek_root: "${defs.roots.mineru3}/wangzhengren/PageElement/data/VisRAG/data/EVisRAG-Test-ViDoSeek"
     mineru: "/root/checkpoints/MinerU2.5-2509-1.2B/"
 
   # --- 服务地址 ---
@@ -44,7 +44,7 @@ defs:
 benchmark:   finrag
 data_root:   "${defs.paths.finrag_root}"
 finrag_lang: ch
-output_dir: "./results_${benchmark}_${finrag_lang}_${defs.models.gen}"
+output_dir: "./outputs/results_${benchmark}_${finrag_lang}_${defs.models.gen}"
 
 num_threads: 8
 top_k:       10

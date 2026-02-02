@@ -17,7 +17,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 
 from src.loaders.base_loader import BaseDataLoader, StandardSample, PageElement
 from src.agents.ElementExtractor import ElementExtractor
-from scripts.qwen3_vl_reranker import Qwen3VLReranker
+from scripts.qwen3_vl_reranker_client import Qwen3VLReranker
 from src.utils.llm_helper import create_llm_caller
 
 # --- Scoring Functions ported from mmlongbench_eval_score.py ---
@@ -481,7 +481,7 @@ class MMLongLoader(BaseDataLoader):
             print(f"Error during reranking: {e}")
             return pages
 
-    def pipeline(self, query: str, image_paths: List[str] = None,  top_k: int = 5) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10, trunc_thres=0.0, trunc_bbox=False) -> List[PageElement]:
         if self.extractor is None:
             print("Error: ElementExtractor is not initialized in MMLongLoader.")
             return []
@@ -518,6 +518,7 @@ class MMLongLoader(BaseDataLoader):
         if self.reranker and len(candidate_pages) > top_k:
             ranked_pages = self.rerank(query, candidate_pages)
             target_pages = ranked_pages[:top_k]
+            target_pages = [ page for page in target_pages if page.retrieval_score >= trunc_thres]
         else:
             target_pages = candidate_pages[:top_k]
 
@@ -616,6 +617,8 @@ class MMLongLoader(BaseDataLoader):
             except Exception as e:
                 print(f"Error during agent execution on {img_path}: {e}")
 
+        if trunc_bbox:
+            extracted_elements = extracted_elements[:top_k]
         return extracted_elements
 
 if __name__ == "__main__":
