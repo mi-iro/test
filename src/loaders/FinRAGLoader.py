@@ -296,7 +296,7 @@ class FinRAGLoader(BaseDataLoader):
 
         return image_map
 
-    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10) -> List[PageElement]:
+    def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10, trunc_thres=0.0, trunc_bbox=False) -> List[PageElement]:
         """
         修改后的 Pipeline：直接处理 PDF 文档而非检索池
         """
@@ -329,12 +329,14 @@ class FinRAGLoader(BaseDataLoader):
         if self.rerank_model and len(all_pages_to_process) > top_k:
             ranked_pages = self.rerank(query, all_pages_to_process)
             target_pages = ranked_pages[:top_k]
-            # target_pages = [ page for page in target_pages if page.retrieval_score >= 0.1]
+            target_pages = [ page for page in target_pages if page.retrieval_score >= trunc_thres]
         else:
             target_pages = all_pages_to_process[:top_k]
 
         # 3. 调用 ElementExtractor 进行细粒度提取
         elements = self.extract_elements_from_pages(target_pages, query)
+        if trunc_bbox:
+            elements = elements[:top_k]
         return elements
 
 

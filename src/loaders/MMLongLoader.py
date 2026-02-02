@@ -3,7 +3,6 @@ import json
 import re
 import sys
 import ast
-import asyncio
 import uuid
 import torch
 import collections
@@ -531,19 +530,10 @@ class MMLongLoader(BaseDataLoader):
             img_path = page.corpus_path
             
             try:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-
-                if loop and loop.is_running():
-                    print("Warning: Async loop running. Skipping extraction.")
-                    continue
-                else:
-                    agent_output = asyncio.run(self.extractor.run_agent(
-                        user_text=query,
-                        image_paths=[img_path]  
-                    ))
+                agent_output = self.extractor.run_agent(
+                    user_text=query,
+                    image_paths=[img_path]  
+                )
                 
                 if not agent_output:
                     continue
