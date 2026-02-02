@@ -42,6 +42,7 @@ defs:
 # ==============================================================================
 
 benchmark:   finrag
+data_root:   "${defs.paths.finrag_root}"
 finrag_lang: ch
 output_dir: "./results_${benchmark}_${finrag_lang}_${defs.models.gens}"
 
@@ -68,7 +69,6 @@ api_key:    "${defs.secrets.gen_key}"
 base_url:   "${defs.urls.generate}"
 
 # --- 检索与 Embedding 配置 (RAG Core) ---
-data_root:         "${defs.paths.data}"
 # 路径拼接示例：在基础路径后追加具体模型文件夹
 embedding_model:   "${defs.paths.qwen_root}/Qwen3-VL-Embedding-8B"
 reranker_model:    "${defs.paths.qwen_root}/Qwen3-VL-Reranker-8B"
