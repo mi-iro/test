@@ -3,11 +3,12 @@ import os
 import sys
 import torch
 import json
-import yaml
+import yaml # 保留用于dump结果
 import concurrent.futures
 import traceback
 from tqdm import tqdm
 from PIL import Image
+from omegaconf import OmegaConf  # [New] 引入 OmegaConf
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
@@ -82,13 +83,22 @@ def get_parser():
 
 def parse_args_with_config():
     parser = get_parser()
+    # 首先解析命令行以获取 config 路径
     temp_args, _ = parser.parse_known_args()
+    
     if temp_args.config and os.path.exists(temp_args.config):
-        print(f"📄 Loading configuration from {temp_args.config}...")
-        with open(temp_args.config, 'r', encoding='utf-8') as f:
-            config_data = yaml.safe_load(f)
-            if config_data:
-                parser.set_defaults(**config_data)
+        print(f"📄 Loading configuration from {temp_args.config} via OmegaConf...")
+        # [New] 使用 OmegaConf 加载
+        conf = OmegaConf.load(temp_args.config)
+        
+        # [New] 关键步骤：解析插值变量 (resolve=True)，例如将 ${defs.paths.data} 转换为实际路径
+        config_data = OmegaConf.to_container(conf, resolve=True)
+        
+        if config_data:
+            # 过滤掉不在 argparse 定义中的 key，防止报错（可选，视 argparse 设置而定，set_defaults 通常比较宽容）
+            # 这里直接传入，argparse 会忽略多余的 key (如 'defs')
+            parser.set_defaults(**config_data)
+            
     args = parser.parse_args()
     return args
 
@@ -112,6 +122,7 @@ def main():
 
     config_path = os.path.join(args.output_dir, f"config_{args.agent_type}.yaml")
     with open(config_path, "w", encoding="utf-8") as f:
+        # 使用 standard yaml dump 保存最终解析后的配置，方便排查
         yaml.dump(vars(args), f, default_flow_style=False, allow_unicode=True)
 
     print(f"🚀 Starting Benchmark: {args.benchmark.upper()}")

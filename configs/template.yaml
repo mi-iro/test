@@ -1,74 +1,82 @@
 # ==============================================================================
-# 1. 变量定义区 (VARIABLES / DEFINITIONS)
-#    在此处修改常用的路径、模型名称和 API 设置，下方会自动引用。
-#    注意：此处的 key (如 _defaults) 仅用于定义变量，程序读取时通常会忽略多余的 key。
+# 1. 变量定义区 (DEFINITIONS)
+#    这里定义基础变量，支持层级结构。
+#    使用 ${...} 语法进行引用和拼接。
 # ==============================================================================
-_defaults:
-  # --- 密钥与模型设置 ---
+defs:
+  # --- 密钥 ---
   secrets:
-    api_key_gen: &VAR_API_KEY_GEN "sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR"
-    api_key_ext: &VAR_API_KEY_EXT "sk-123456"
-  
+    gen_key: "sk-6TGzZJkJ5HfZKwnrS1A1pMb1lH5D7EDfSVC6USq24aN2JaaR"
+    ext_key: "sk-123456"
+
+  # --- 模型标识 ---
   models:
-    llm_name:     &VAR_MODEL_NAME "Qwen2.5-VL-72B-Instruct"
-    ext_model:    &VAR_EXT_MODEL  "MinerU-Agent-CK800"
+    gen: "Qwen2.5-VL-72B-Instruct"
+    ext: "MinerU-Agent-CK800"
 
-  # --- 本地文件路径 (Paths) ---
+  # --- 路径前缀 (拼接演示) ---
+  roots:
+    mineru2: "/mnt/shared-storage-user/mineru2-shared"
+    mineru3: "/mnt/shared-storage-user/mineru3-share"
+
+  # --- 具体路径 ---
   paths:
-    # 数据根目录
-    data_root:    &VAR_PATH_DATA    "/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V"
-    # 模型 Checkpoint 路径
-    emb_model:    &VAR_PATH_EMBED   "/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Embedding-8B"
-    rerank_model: &VAR_PATH_RERANK  "/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B"
-    mineru_ckpt:  &VAR_PATH_MINERU  "/root/checkpoints/MinerU2.5-2509-1.2B/"
-    output_dir:   &VAR_PATH_OUTPUT  "./results_fingrag_ch_qwen2.5-vl-72b-instruct"
+    # 使用变量拼接完整路径
+    qwen_root:    "${defs.roots.mineru3}/wangzhengren/JIT-RAG/assets/Qwen"
+    finrag_root:  "${defs.roots.mineru2}/jiayu/data/FinRAGBench-V"
+    docvqa_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-DocVQA"
+    mmlong_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/MMLongBench-Doc"
+    mineru: "/root/checkpoints/MinerU2.5-2509-1.2B/"
 
-  # --- 服务地址 (Server URLs) ---
-  servers:
-    llm_api:      &VAR_URL_LLM      "http://localhost:8002/v1"
-    extract_api:  &VAR_URL_EXTRACT  "http://localhost:8001/v1"
-    rerank_api:   &VAR_URL_RERANK   "http://localhost:8000/"
-    mineru_serv:  &VAR_URL_MINERU   "http://10.102.98.181:8000/"
+  # --- 服务地址 ---
+  urls:
+    mineru:  "http://10.102.98.181:8000/"
+    rerank:  "http://localhost:8000/"
+    extract: "http://localhost:8001/v1"
+    generate:     "http://localhost:8002/v1"
 
 # ==============================================================================
 # 2. 实际配置区 (ACTUAL CONFIGURATION)
-#    程序实际读取的参数，使用 *VAR_NAME 进行引用。
+#    RunAgent 读取的扁平化参数，直接引用上方的定义。
 # ==============================================================================
 
+benchmark:   finrag
+finrag_lang: ch
+output_dir: "./results_${benchmark}_${finrag_lang}_${defs.models.gens}"
+
+num_threads: 8
+top_k:       10
+
+use_page:    true
+use_crop:    true
+use_ocr:     true
+use_ocr_raw: true
+trunc_thres: 0.0
+trunc_bbox: false
+
+limit:       null
+infer_only:  false
+force_rebuild_index: false
+max_rounds:  5
+
 # --- 基础模型配置 (LLM & Agent) ---
+
 agent_type: standard
-model_name: *VAR_MODEL_NAME
-api_key:    *VAR_API_KEY_GEN
-base_url:   *VAR_URL_LLM
+model_name: "${defs.models.gen}"
+api_key:    "${defs.secrets.gen_key}"
+base_url:   "${defs.urls.generate}"
 
 # --- 检索与 Embedding 配置 (RAG Core) ---
-data_root:         *VAR_PATH_DATA
-embedding_model:   *VAR_PATH_EMBED
-reranker_model:    *VAR_PATH_RERANK
-reranker_api_base: *VAR_URL_RERANK
+data_root:         "${defs.paths.data}"
+# 路径拼接示例：在基础路径后追加具体模型文件夹
+embedding_model:   "${defs.paths.qwen_root}/Qwen3-VL-Embedding-8B"
+reranker_model:    "${defs.paths.qwen_root}/Qwen3-VL-Reranker-8B"
+reranker_api_base: "${defs.urls.rerank}"
 reranker_api_key:  EMPTY
-finrag_lang:       ch
 
 # --- MinerU 提取器配置 (Extractor) ---
-extractor_model_name: *VAR_EXT_MODEL
-extractor_base_url:   *VAR_URL_EXTRACT
-extractor_api_key:    *VAR_API_KEY_EXT
-mineru_model_path:    *VAR_PATH_MINERU
-mineru_server_url:    *VAR_URL_MINERU
-
-# --- 运行时参数 (Runtime Settings) ---
-config: config_finrag_ch.yaml
-output_dir: *VAR_PATH_OUTPUT
-num_threads: 8
-max_rounds: 5
-top_k: 10
-limit: null
-infer_only: false
-
-# --- 功能开关 (Switches) ---
-force_rebuild_index: false
-use_crop: true
-use_ocr: true
-use_ocr_raw: true
-use_page: true
-benchmark: finrag
+extractor_model_name: "${defs.models.ext}"
+extractor_base_url:   "${defs.urls.extract}"
+extractor_api_key:    "${defs.secrets.ext_key}"
+mineru_model_path:    "${defs.paths.mineru}"
+mineru_server_url:    "${defs.urls.mineru}"
