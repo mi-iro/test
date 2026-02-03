@@ -325,9 +325,9 @@ class MMLongLoader(BaseDataLoader):
                 
                 score = eval_score(gold_answer, final_pred_to_score, gold_format)
                 
-                metrics_result['qa_score'] = score
-                total_metrics['qa_score'] += score
-                counts['qa'] += 1
+                metrics_result['model_eval'] = score
+                total_metrics['model_eval'] += score
+                counts['total'] += 1
             
             # --- 2. Page Retrieval Evaluation ---
             raw_elements = sample.extra_info.get('retrieved_elements', [])
@@ -353,8 +353,8 @@ class MMLongLoader(BaseDataLoader):
             sample.extra_info['metrics'] = metrics_result
 
         avg_results = {}
-        if counts['qa'] > 0:
-            avg_results['avg_qa_score'] = total_metrics['qa_score'] / counts['qa']
+        if counts['total'] > 0:
+            avg_results['avg_model_eval'] = total_metrics['model_eval'] / counts['total']
         
         if counts['page'] > 0:
             avg_results['avg_page_recall'] = total_metrics['page_recall'] / counts['page']
