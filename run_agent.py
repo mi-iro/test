@@ -43,7 +43,7 @@ def get_parser():
 
     parser.add_argument("--benchmark", type=str, default="mmlong", choices=["mmlong", "finrag"], help="Target benchmark.")
     parser.add_argument("--data_root", type=str, default="/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/MMLongBench-Doc", help="Dataset root.")
-    parser.add_argument("--output_dir", type=str, default="./results_rag", help="Directory to save results.")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save results.")
     
     parser.add_argument("--model_name", type=str, default="qwen2.5-72b-instruct", help="LLM model name.")
     parser.add_argument("--base_url", type=str, default="http://localhost:3888/v1", help="LLM API Base URL.")
@@ -166,6 +166,7 @@ def main():
         print("📥 Loading MMLongLoader...")
         loader = MMLongLoader(
             data_root=args.data_root, 
+            output_dir=args.output_dir,
             extractor=extractor,
             reranker=reranker
         )
@@ -176,6 +177,7 @@ def main():
         # embedder = Qwen3VLEmbedder(model_name_or_path=args.embedding_model, torch_dtype=torch.float16)
         loader = FinRAGLoader(
             data_root=args.data_root,
+            output_dir=args.output_dir,
             lang=args.finrag_lang,
             embedding_model=None,
             rerank_model=reranker,

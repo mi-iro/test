@@ -73,7 +73,7 @@ def extract_pdf_prefix(filename):
     return filename
 
 class FinRAGLoader(BaseDataLoader):
-    def __init__(self, data_root: str, lang: str = "ch", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
+    def __init__(self, data_root: str, lang: str = "ch", output_dir: str = "./", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
         super().__init__(data_root)
         self.lang = lang.lower()
         self.embedding_model = embedding_model
@@ -85,6 +85,7 @@ class FinRAGLoader(BaseDataLoader):
         self.corpus_root = os.path.join(data_root, "data", "corpus", self.lang, "img")
         self.qrels_path = os.path.join(data_root, "data", "qrels", f"qrels_{self.lang}.tsv")
         self.citation_root = os.path.join(data_root, "data", "citation_labels", "citation_labels_new")
+        self.output_dir = output_dir
         
         # 索引路径
         cache_dir = os.path.join(data_root, "data", "indices")
@@ -371,7 +372,7 @@ class FinRAGLoader(BaseDataLoader):
             print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
             return pages 
 
-        workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "workspace", "crops"))
+        workspace_dir = os.path.abspath(os.path.join(self.output_dir, "workspace", "crops"))
         os.makedirs(workspace_dir, exist_ok=True)
 
         fine_grained_elements = []
