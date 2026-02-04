@@ -156,9 +156,10 @@ class RAGAgent:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.0
+                temperature=1.0
             )
             final_answer = response.choices[0].message.content
+            #print(final_answer)
         except Exception as e:
             print(f"LLM API Error: {e}")
             final_answer = "Error during generation."

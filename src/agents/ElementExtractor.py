@@ -7,47 +7,64 @@ from typing import List, Dict, Optional
 from .utils import * # Assuming local_image_to_data_url and TOOL_CALL_RE are here
 
 from openai import OpenAI
-
+import ast
 SYSTEM_PROMPT = """You are an advanced Visual Document Analysis Agent capable of precise evidence extraction from document images. Your goal is to answer user queries by locating, reading, and extracting specific information from a page.
 
 ### Your Capabilities & Tools
+
 You have access to a powerful tool named **`image_zoom_and_ocr_tool`**.
 
-- **Functionality**:  
-  Crop a specific region of the image, optionally rotate it, and perform OCR on the cropped region.
+* **Functionality**:
+  Crop a specific region of the image, optionally rotate it, and perform OCR or layout analysis depending on the element type.
 
-- **When to use**:  
-  - Always use this tool when the user asks for **specific text, numbers, names, dates, tables, or factual details** from the page.
-  - Do NOT rely solely on the global low-resolution image when reading dense or small text.
-  - If the target text is rotated, estimate and set the `angle` parameter before OCR.
+* **When to use**:
 
-- **Parameters**:
-  - `label`: A short description of what you are looking for.
-  - `bbox`: `[xmin, ymin, xmax, ymax]` in **0–1000 normalized coordinates**, relative to the original page.
-  - `angle`: Rotation angle (counter-clockwise) applied after cropping. Default is `0`.
-  - `do_ocr`: Whether to perform OCR on the cropped image.
+  * Always use this tool when the user asks for **specific text, numbers, names, dates, tables, equations, images, or factual details** from the page.
+  * If the target text or table is rotated, estimate and set the `angle` parameter before cropping.
+  * Use `type` to indicate the content type for the region:
+
+    * `"region"` — perform layout detection + OCR on a potentially complex area, returning detailed structured information.
+    * `"text"` — perform OCR for a single text element.
+    * `"table"` — perform OCR and parsing for a table element.
+    * `"image"` — crop the image region only, without OCR.
+    * `"equation"` — perform OCR for mathematical or scientific equations.
+
+* **Parameters**:
+
+  * `label`: A short description of what you are looking for.
+  * `bbox`: `[xmin, ymin, xmax, ymax]` in **0–1000 normalized coordinates**, relative to the original page.
+  * `angle`: Rotation angle (counter-clockwise) applied after cropping. Always try to adjust it so the content is upright for best recognition.
+  * `type`: One of `"region"`, `"text"`, `"table"`, `"image"`, `"equation"`.
 
 ### Tool Usage Example
-Use the tool strictly in the following format:
 
-<tool_call>
-{"name": "image_zoom_and_ocr_tool", "arguments": {"label": "<A short description of what you are looking for>", "bbox": [xmin, ymin, xmax, ymax], "angle":<0/90/180/270>, "do_ocr": <true/false>}}
+Use the tool strictly in the following format:
+<think>
+...
+</think>
+<tool_call> 
+{"name": "image_zoom_and_ocr_tool", "arguments": {"label": "<A short description of what you are looking for>", "bbox": [xmin, ymin, xmax, ymax], "angle":<0/90/180/270>, "type": "<region/text/table/image/equation>"}}
 </tool_call>
 
 ### Your Input and Task
-The user input includes:
+
+The input includes:
+
 1. One page image of a visual document.
 2. The user's query intent.
 
 Please execute the following steps:
+
 1. **Semantic Matching**: Carefully observe the image to determine if the page content contains evidence information relevant to the user's query. If it is irrelevant, return an empty list.
-2. **Precise Localization**: If relevant, extract the complete chain of visual evidence that helps to answer the query (text blocks, tables, charts or image regions).
-3. **Speical Notes**: The page image may contain several evidence pieces. Pay attention to tables, charts and images, as they could also contain evidence.
+2. **Precise Localization**: If relevant, extract the complete chain of visual evidence that helps to answer the query (text blocks, tables, charts, images, or equations).
+3. **Special Notes**: The page image may contain several evidence pieces. Pay attention to tables, charts, images, and equations, as they could also contain evidence.
 
 ### Output Format
-After gathering information, output the list of relevant evidence in the following JSON format.  
-If the page image is not relevant, return an empty list.
 
+After gathering information, output the list of relevant evidence in the following JSON format.
+<think>
+...
+</think>
 ```json
 [
   {
@@ -58,7 +75,13 @@ If the page image is not relevant, return an empty list.
 ]
 ```
 
-Let us think step by step, using tool calling for better understanding of details!
+If the page image is not relevant, return an empty list.
+<think>
+...
+</think>
+```json
+[]
+```
 """
 
 class ElementExtractor:
@@ -71,34 +94,56 @@ class ElementExtractor:
         self.tool = tool
         self.max_image_size = max_image_size
 
-    def compress_image(self, image_path: str) -> str:
+    def compress_image(
+        self,
+        image_path: str,
+        mode: str = "keep_ratio",
+        target_size: int = 1000,
+    ) -> str:
         """
-        Compresses/Resizes the image to ensure the longest side does not exceed self.max_image_size.
-        Returns the base64 encoded data URL string.
+        Compresses / Resizes an image and returns a base64 data URL.
+
+        Modes:
+        - keep_ratio: keep aspect ratio, longest side <= self.max_image_size
+        - fixed: resize to (target_size, target_size)
         """
         try:
             with Image.open(image_path) as img:
-                # Calculate new size maintaining aspect ratio
                 width, height = img.size
-                if max(width, height) > self.max_image_size:
-                    scale = self.max_image_size / max(width, height)
-                    new_width = int(width * scale)
-                    new_height = int(height * scale)
-                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                
-                # Convert to base64
+
+                if mode == "keep_ratio":
+                    if max(width, height) > self.max_image_size:
+                        scale = self.max_image_size / max(width, height)
+                        new_width = int(width * scale)
+                        new_height = int(height * scale)
+                        img = img.resize(
+                            (new_width, new_height),
+                            Image.Resampling.LANCZOS
+                        )
+
+                elif mode == "fixed":
+                    img = img.resize(
+                        (target_size, target_size),
+                        Image.Resampling.LANCZOS
+                    )
+
+                else:
+                    raise ValueError(f"Unknown compress mode: {mode}")
+
+                # Encode to base64
                 buffered = BytesIO()
-                # Use JPEG for compression efficiency unless transparency is needed
-                fmt = 'PNG' if img.mode == 'RGBA' else 'JPEG'
-                img.save(buffered, format=fmt)
-                img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                fmt = "PNG" if img.mode == "RGBA" else "JPEG"
+                img.save(buffered, format=fmt, quality=85, optimize=True)
+
+                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 mime_type = f"image/{fmt.lower()}"
-                
+
                 return f"data:{mime_type};base64,{img_str}"
+
         except Exception as e:
             print(f"[ERROR] Failed to compress image {image_path}: {e}")
-            # Fallback to original method if compression fails
             return local_image_to_data_url(image_path)
+
 
     def build_multimodal_user_message(
         self,
@@ -113,7 +158,7 @@ class ElementExtractor:
                 content.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": self.compress_image(path)
+                        "url": self.compress_image(path,mode="fixed")
                     }
                 })
 
@@ -144,7 +189,7 @@ class ElementExtractor:
             content.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": self.compress_image(image_path)
+                        "url": self.compress_image(image_path,mode="keep_ratio")
                     }
                 })
 
@@ -163,26 +208,30 @@ class ElementExtractor:
             "role": "user",
             "content": content
         }
-
-    def extract_tool_call(self, text: str, as_json: bool = False):
-        """
-        Extract content from <tool_call> tag.
-        """
-        # Ensure TOOL_CALL_RE is defined in .utils or locally
-        # If not, you might need: TOOL_CALL_RE = re.compile(r'<tool_call>(.*?)</tool_call>', re.DOTALL)
-        match = TOOL_CALL_RE.search(text)
-        if not match:
+    def extract_tool_call(self,text: str):
+        m = TOOL_CALL_RE.search(text)
+        if not m:
             return None
-        
-        tool_text = match.group(1).strip()
-        
-        if as_json:
+
+        raw = m.group(1).strip()
+
+        # 找第一个 dict（从第一个 { 到最后一个 }）
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+
+        payload = raw[start:end + 1]
+
+        try:
+            return json.loads(payload)
+        except Exception:
             try:
-                return json.loads(tool_text)
-            except json.JSONDecodeError:
+                return ast.literal_eval(payload)
+            except Exception:
                 return None
-        else:
-            return tool_text
+
+        return None
 
     # ---------- tool mock ----------
 
@@ -244,7 +293,7 @@ class ElementExtractor:
             messages.append({"role": "assistant", "content": content})
             output["predictions"].append({"role": "assistant", "content": content})
 
-            tool_call = self.extract_tool_call(content, as_json=True)
+            tool_call = self.extract_tool_call(content)
             
             # No tool call -> agent finished
             if tool_call is None:
@@ -282,14 +331,14 @@ if __name__ == "__main__":
     # from .tools import ImageZoomOCRTool 
 
     agent = ElementExtractor(
-        base_url="http://localhost:8001/v1",
-        api_key="sk-123456",
-        model_name="MinerU-Agent-CK800",
-        tool=ImageZoomOCRTool(work_dir="/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/src/agents/workspace"),
+        base_url="http://localhost:8000/v1",
+        api_key="no-key-required",
+        model_name="/mnt/shared-storage-user/mineru2-shared/madongsheng/saves/Qwen3-VL-8B-Instruct/full/demond_0203_f_base/checkpoint-400",
+        tool=ImageZoomOCRTool(work_dir="/mnt/shared-storage-user/mineru2-shared/madongsheng/zoom"),
         max_image_size=2048 # Limit longest edge to 2048px
     )
     
-    file_path = "/mnt/shared-storage-user/mineru2-shared/madongsheng/dataset/codevision/codevision_rl_with_ids.json"
+    file_path = "/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/citation_labels/citation_labels_new/finragbench_bbox_test.json"
 
     # Read JSON file
     with open(file_path, "r", encoding="utf-8") as f:

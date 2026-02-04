@@ -15,10 +15,11 @@ from PIL import Image
 from mineru_vl_utils import MinerUClient
 
 
+
 TOOL_CALL_RE = re.compile(
-        r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-        re.DOTALL
-    )
+    r"<tool_call>\s*(.*?)\s*</tool_call>",
+    re.DOTALL
+)
 
 @staticmethod
 def local_image_to_data_url(path: str) -> str:
@@ -38,41 +39,7 @@ def local_image_to_data_url(path: str) -> str:
 
 
 class ImageZoomOCRTool:
-
     description = 'Zoom in on a specific region of an image by cropping it based on a bounding box (bbox), optionally rotate it or perform OCR.'
-    parameters = {
-        'type': 'object',
-        'properties': {
-            'label': {
-                'type': 'string',
-                'description': 'The name or label of the object in the specified bounding box'
-            },
-            'bbox': {
-                'type':
-                    'array',
-                'items': {
-                    'type': 'number'
-                },
-                'minItems':
-                    4,
-                'maxItems':
-                    4,
-                'description':
-                    'The bbox specified as [x1, y1, x2, y2] in 0-1000 coordinates, relative to the page image from the user.'
-            },
-            'angle': {
-                'type': 'number',
-                'description': 'The angle to rotate the image (counter-clockwise) after cropping. Default is 0.',
-                'default': 0
-            },
-            'do_ocr': {
-                'type': 'boolean',
-                'description': 'Whether OCR the processed image. OCR returns results with bboxes relative to the page image from user. Default is False.',
-                'default': False
-            }
-        },
-        'required': ['bbox', 'label']
-    }
 
     def __init__(self,work_dir ,mineru_server_url="http://10.102.98.181:8000/",mineru_model_path="/root/checkpoints/MinerU2.5-2509-1.2B/"):
         self.mineru_model_path = mineru_model_path
@@ -161,7 +128,7 @@ class ImageZoomOCRTool:
         # 逆旋转 (PIL rotate is counter-clockwise, so inverse is clockwise / negative angle)
         # 公式: x' = x cos(-θ) - y sin(-θ)
         #       y' = x sin(-θ) + y cos(-θ)
-        rad = radians(-rotation_angle)
+        rad = radians(rotation_angle)
         cos_a = cos(rad)
         sin_a = sin(rad)
 
@@ -203,7 +170,7 @@ class ImageZoomOCRTool:
             params = tool_call["arguments"]
             bbox = params['bbox']
             angle = params.get('angle', 0)
-            do_ocr = params.get('do_ocr', False)
+            type_ = params.get('type', "region")
         except Exception as e:
             print(f'{e}')
             return [False, f'Error: Invalid tool_call params']
@@ -257,14 +224,14 @@ class ImageZoomOCRTool:
             output_path = os.path.abspath(os.path.join(self.work_dir, output_filename))
             final_image.save(output_path)
 
-            if not do_ocr:
+            if type_ == "image":
                 return [True,output_path]
 
             # 6. OCR with MinerU
             mineru_result = []
             ocr_text_output = ""
 
-            try:
+            if type_ == "region":
                 client = self._get_mineru_client()
                 img_for_ocr = Image.open(output_path).convert("RGB")
 
@@ -281,11 +248,6 @@ class ImageZoomOCRTool:
                         time.sleep(1)
 
                 if raw_mineru_result:
-                    if len(raw_mineru_result) == 1 and raw_mineru_result[0].get('type') == 'image':
-                        # 对输入区域调用OCR
-                        ocr_text_output = client.content_extract(img_for_ocr)
-                        raw_mineru_result[0]['content'] = ocr_text_output
-                    
                     transformed_results = []
                     for item in raw_mineru_result:
                         raw_bbox = item.get('bbox', [])
@@ -313,8 +275,10 @@ class ImageZoomOCRTool:
                             min(orig_x1, orig_x2),
                             min(orig_y1, orig_y2),
                             max(orig_x1, orig_x2),
-                            max(orig_y1, orig_y2)
+                            max(orig_y1, orig_y2),
+                            
                         ]
+                        new_item['angle'] = (new_item['angle'] + angle) % 360
                         transformed_results.append(new_item)
 
                     mineru_result = transformed_results
@@ -322,19 +286,38 @@ class ImageZoomOCRTool:
                 else:
                     ocr_text_output = "MinerU returned empty result."
 
-            except Exception as e:
-                print(f"MinerU Processing Error: {e}")
-                ocr_text_output = f"MinerU Error: {str(e)}"
+                return [
+                    True,
+                    output_path,
+                    f"Region OCR Result (Mapped to original coords): {ocr_text_output}"
+                ]
+            else:
+                client = self._get_mineru_client()
+                img_for_ocr = Image.open(output_path).convert("RGB")
 
-            return [
-                True,
-                output_path,
-                f"OCR Result (Mapped to original coords): {ocr_text_output}"
-            ]
+                max_retries = 3
+                raw_mineru_result = None
+                for attempt in range(max_retries):
+                    try:
+                        raw_mineru_result = client.content_extract(image=img_for_ocr,type=type_)
+                        if raw_mineru_result:
+                            break
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            print(f"MinerU failed after {max_retries} attempts: {e}")
+                        time.sleep(1)
 
+                ocr_text_output = raw_mineru_result
+
+                return [
+                    True,
+                    output_path,
+                    f"{type_.capitalize()} OCR Result: {ocr_text_output}"
+                ]
         except Exception as e:
             obs = f'Tool Execution Error: {str(e)}'
             return [False,obs]
+
         
 import os
 import math
