@@ -118,6 +118,15 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         mineru_server_url=args.mineru_server_url,
         mineru_model_path=args.mineru_model_path
     )
+
+    #增加一个判断器
+    judge = ElementExtractor(
+        base_url=args.judge_base_url,
+        api_key=args.judge_api_key,
+        model_name=args.judge_model_name,
+        tool=tool
+    )
+
     extractor = ElementExtractor(
         base_url=args.extractor_base_url,
         api_key=args.extractor_api_key,
@@ -139,7 +148,7 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         loader = MMLongLoader(data_root=args.data_root, output_dir=args.output_dir, extractor=extractor, reranker=reranker)
         loader.load_data()
     elif args.benchmark == "finrag":
-        loader = FinRAGLoader(data_root=args.data_root, output_dir=args.output_dir, lang=args.finrag_lang, rerank_model=reranker, extractor=extractor, embedding_model=None)
+        loader = FinRAGLoader(data_root=args.data_root, output_dir=args.output_dir, lang=args.finrag_lang, rerank_model=reranker, extractor=extractor,judge=judge, embedding_model=None)
         loader.load_data()
     elif args.benchmark == "docvqa":
         loader = DocVQALoader(data_root=args.data_root, rerank_model=reranker, extractor=extractor)

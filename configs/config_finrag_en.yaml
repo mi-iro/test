@@ -34,6 +34,7 @@ defs:
   # --- 服务地址 ---
   urls:
     mineru:  "http://10.102.98.181:8000/"
+    #need start reranker
     rerank:  "http://10.102.214.86:8000/"
     extract: "http://10.102.244.38:8001/v1"
     generate: "http://localhost:3888/v1"
@@ -59,7 +60,7 @@ use_ocr_raw: true
 trunc_thres: 0.0
 trunc_bbox: false
 
-limit:       100
+limit:       null
 infer_only:  false
 force_rebuild_index: false
 max_rounds:  5
