@@ -1,18 +1,20 @@
 #!/bin/bash
 
-# 设置 CUDA 设备（如果需要指定显卡）
-export CUDA_VISIBLE_DEVICES=0
+# 1. 设置 CUDA 设备：列出所有要参与并行的显卡 ID
+export CUDA_VISIBLE_DEVICES=2,3
+
+# 2. 设置 vLLM 的张量并行度 (必须与可见显卡数量一致)
+export TENSOR_PARALLEL_SIZE=2
+
+# 解决某些环境下的多进程启动问题
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # 设置端口
 PORT=8000
 HOST="0.0.0.0"
 
-echo "Starting Qwen-VL Reranker Service on ${HOST}:${PORT}..."
+echo "Starting Qwen-VL Reranker Service on ${HOST}:${PORT} with TP=${TENSOR_PARALLEL_SIZE}..."
 
-# 使用 uvicorn 启动 qwen3_vl_reranker_server.py
-# 假设 qwen3_vl_reranker_server.py 在当前目录下
+# 启动命令保持不变，workers 仍然是 1
+# 因为 vLLM 内部会管理多卡进程
 python -m uvicorn qwen3_vl_reranker_server:app --host $HOST --port $PORT --workers 1
-
-# 注意：由于 vLLM 的 LLM 类不是进程安全的，workers 必须设为 1。
-# 如果需要更高并发，应修改 server.py 使用 AsyncLLMEngine。

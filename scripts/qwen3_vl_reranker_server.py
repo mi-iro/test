@@ -132,12 +132,14 @@ async def startup_event():
     print("Initializing vLLM Engine...")
     
     try:
+        tp_size = int(os.getenv("TENSOR_PARALLEL_SIZE", 1))
         llm_engine = LLM(
             model='/mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B',
             # model='/mnt/shared-storage-user/mineru2-shared/madongsheng/modelscope/Qwen/Qwen3-VL-Reranker-2B',
             runner='pooling',
             dtype='bfloat16',
             trust_remote_code=True,
+            tensor_parallel_size=tp_size,
             hf_overrides={
                 "architectures": ["Qwen3VLForSequenceClassification"],
                 "classifier_from_token": ["no", "yes"],
@@ -145,6 +147,8 @@ async def startup_event():
             },
             # 限制显存使用，防止 OOM (可选)
             gpu_memory_utilization=0.7,
+            # 如果是多卡，建议指定分布式后端，通常 'ray' 或 'mp'
+            distributed_executor_backend="ray",
         )
         print("Model initialized successfully!")
     except Exception as e:
