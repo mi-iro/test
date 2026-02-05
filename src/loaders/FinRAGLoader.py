@@ -50,14 +50,13 @@ def extract_pdf_prefix(filename):
     return filename
 
 class FinRAGLoader(BaseDataLoader):
-    def __init__(self, data_root: str, lang: str = "ch", output_dir: str = "./", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None, judge: Optional[ElementExtractor] = None):
+    def __init__(self, data_root: str, lang: str = "ch", output_dir: str = "./", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None, judger: Optional[ElementExtractor] = None):
         super().__init__(data_root)
         self.lang = lang.lower()
         self.embedding_model = embedding_model
         self.rerank_model = rerank_model
         self.extractor = extractor
-        #短暂添加一个judge
-        self.judge = judge
+        self.judger = judger
         
         # --- 路径配置 ---
         self.query_path = os.path.join(data_root, "data", "queries", f"queries_{self.lang}.json")
@@ -73,7 +72,6 @@ class FinRAGLoader(BaseDataLoader):
         
         self.doc_id_map = {} 
         self.llm_caller = None
-        self.llm_element_judge = False
 
     def _load_qrels(self) -> Dict[str, List[str]]:
         """读取 qrels TSV 文件。"""
@@ -310,8 +308,54 @@ class FinRAGLoader(BaseDataLoader):
         sorted_pages = sorted(pages, key=lambda x: x.retrieval_score, reverse=True)
         return sorted_pages
 
+    def _execute_agent_and_parse_json(self, agent, query: str, image_path: str, page_id: str = "") -> List[Any]:
+        """
+        Refactored helper function to run an agent (judger or extractor), 
+        extract JSON from its output, and handle parsing errors.
+        """
+        try:
+            agent_output = agent.run_agent(
+                user_text=query,
+                image_paths=[image_path]
+            )
+            
+            if not agent_output:
+                return []
+
+            predictions = agent_output.get("predictions", [])
+            if not predictions:
+                return []
+            
+            last_msg_content = predictions[-1].get("content", "")
+            
+            json_str = "[]"
+            # Try to match markdown json block
+            match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+            if match:
+                json_str = match.group(1).strip()
+            else:
+                # Fallback to finding outermost brackets
+                start = last_msg_content.find('[')
+                end = last_msg_content.rfind(']')
+                if start != -1 and end != -1:
+                    json_str = last_msg_content[start:end+1]
+
+            # Fix common JSON formatting issues in LLM output
+            json_str = json_str.replace("\n", "\\n") 
+            json_str = json_str.replace("\t", "\\t") 
+            
+            extracted_data = json.loads(json_str)
+            return extracted_data
+            
+        except json.JSONDecodeError:
+            print(f"JSON Decode Error for page {page_id}")
+            return []
+        except Exception as e:
+            print(f"Error running agent on {page_id}: {e}")
+            return []
+
     def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
-        if self.judge is None or self.extractor is None:
+        if self.judger is None or self.extractor is None:
             print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
             return pages 
 
@@ -328,77 +372,24 @@ class FinRAGLoader(BaseDataLoader):
                 continue
 
             try:
-                #短暂添加一个judge
-                agent_output = self.judge.run_agent(
-                    user_text=query,
-                    image_paths=[image_path]
-                )
-                
-                if not agent_output:
-                    continue
+                if self.judger is not None:
+                    # 1. Run Judger Agent
+                    extracted_data = self._execute_agent_and_parse_json(
+                        self.judger, query, image_path, page_id=page.corpus_id
+                    )
 
-                predictions = agent_output.get("predictions", [])
-                if not predictions:
-                    continue
-                
-                last_msg_content = predictions[-1].get("content", "")
-                
-                json_str = "[]"
-                match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
-                if match:
-                    json_str = match.group(1).strip()
+                    # 2. If Judger returns data, run Extractor Agent
+                    if extracted_data:
+                        extracted_data = self._execute_agent_and_parse_json(
+                            self.extractor, query, image_path, page_id=page.corpus_id
+                        )
                 else:
-                    start = last_msg_content.find('[')
-                    end = last_msg_content.rfind(']')
-                    if start != -1 and end != -1:
-                        json_str = last_msg_content[start:end+1]
+                    extracted_data = self._execute_agent_and_parse_json(
+                        self.extractor, query, image_path, page_id=page.corpus_id
+                    )
 
-                #修改json读取逻辑
-                json_str= json_str.replace("\n", "\\n") 
-                json_str= json_str.replace("\t", "\\t") 
-                try:
-                    extracted_data = json.loads(json_str)
-                except json.JSONDecodeError:
-                    print(f"JSON Decode Error for page {page.corpus_id}")
-                    extracted_data = []
-
-                #短暂添加一个judge，judge不为空才走下面的提取器流程
-                if extracted_data != []:
-                    agent_output = self.extractor.run_agent(
-                    user_text=query,
-                    image_paths=[image_path]
-                )
-                
-                    if not agent_output:
-                        continue
-
-                    predictions = agent_output.get("predictions", [])
-                    if not predictions:
-                        continue
-                    
-                    last_msg_content = predictions[-1].get("content", "")
-                    
-                    json_str = "[]"
-                    match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
-                    if match:
-                        json_str = match.group(1).strip()
-                    else:
-                        start = last_msg_content.find('[')
-                        end = last_msg_content.rfind(']')
-                        if start != -1 and end != -1:
-                            json_str = last_msg_content[start:end+1]
-
-                    #修改json读取逻辑
-                    json_str= json_str.replace("\n", "\\n") 
-                    json_str= json_str.replace("\t", "\\t") 
-                    try:
-                        extracted_data = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        print(f"JSON Decode Error for page {page.corpus_id}")
-                        extracted_data = []
-
-
-                if isinstance(extracted_data, list):
+                # 3. Process Extracted Data (Bounding Boxes & Crops)
+                if isinstance(extracted_data, list) and extracted_data:
                     try:
                         original_img = Image.open(image_path)
                         img_w, img_h = original_img.size
@@ -412,6 +403,7 @@ class FinRAGLoader(BaseDataLoader):
                         
                         if len(bbox) == 4:
                             x1, y1, x2, y2 = bbox
+                            # Normalize coordinates
                             x1 = int(x1 / 1000 * img_w)
                             y1 = int(y1 / 1000 * img_h)
                             x2 = int(x2 / 1000 * img_w)

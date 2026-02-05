@@ -233,14 +233,14 @@ class MMLongLoader(BaseDataLoader):
     用于加载 MMLongBench-Doc 中的 DocVQA 任务数据，并支持基于 LLM 的评估流程。
     """
     
-    def __init__(self, data_root: str, workspace_dir: str = "./", extractor: Optional[ElementExtractor] = None, reranker: Optional[Qwen3VLReranker] = None):
+    def __init__(self, data_root: str, output_dir: str = "./", extractor: Optional[ElementExtractor] = None, reranker: Optional[Qwen3VLReranker] = None):
         super().__init__(data_root)
         self.extractor = extractor
         self.reranker = reranker # 取消单例，通过初始化注入对象
         
         self.json_path = os.path.join(data_root, "data", "samples.json")
         self.doc_dir = os.path.join(data_root, "data", "documents")
-        self.workspace_dir = workspace_dir
+        self.output_dir = output_dir
         self.llm_caller = None
 
     def _parse_assistant_content(self, content: str) -> Dict[str, Any]:
@@ -419,8 +419,7 @@ class MMLongLoader(BaseDataLoader):
              return {}
 
         pdf_name = os.path.basename(pdf_path).rsplit('.', 1)[0]
-        workspace_dir = os.path.abspath(os.path.join(self.output_dir, "workspace", "pdf_cache"))
-        cache_dir = os.path.join(workspace_dir, pdf_name)
+        cache_dir = os.path.join(os.path.abspath(os.path.join(self.data_root, "pdf_cache")), pdf_name)
         os.makedirs(cache_dir, exist_ok=True)
         
         image_map = {}

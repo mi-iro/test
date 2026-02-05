@@ -54,6 +54,9 @@ def get_common_parser():
     parser.add_argument("--extractor_model_name", type=str, default="MinerU-Agent-CK300")
     parser.add_argument("--extractor_base_url", type=str, default="http://localhost:8001/v1")
     parser.add_argument("--extractor_api_key", type=str, default="sk-123456")
+    parser.add_argument("--judger_model_name", type=str, default="")
+    parser.add_argument("--judger_base_url", type=str, default="")
+    parser.add_argument("--judger_api_key", type=str, default="")
 
     # Generation Context Params
     parser.add_argument("--use_page", action="store_true")
@@ -119,13 +122,15 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         mineru_model_path=args.mineru_model_path
     )
 
-    #增加一个判断器
-    judge = ElementExtractor(
-        base_url=args.judge_base_url,
-        api_key=args.judge_api_key,
-        model_name=args.judge_model_name,
-        tool=tool
-    )
+    if args.judger_base_url and args.judger_api_key and args.judger_model_name:
+        judger = ElementExtractor(
+            base_url=args.judger_base_url,
+            api_key=args.judger_api_key,
+            model_name=args.judger_model_name,
+            tool=tool
+        )
+    else:
+        judger = None
 
     extractor = ElementExtractor(
         base_url=args.extractor_base_url,
@@ -148,7 +153,7 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         loader = MMLongLoader(data_root=args.data_root, output_dir=args.output_dir, extractor=extractor, reranker=reranker)
         loader.load_data()
     elif args.benchmark == "finrag":
-        loader = FinRAGLoader(data_root=args.data_root, output_dir=args.output_dir, lang=args.finrag_lang, rerank_model=reranker, extractor=extractor,judge=judge, embedding_model=None)
+        loader = FinRAGLoader(data_root=args.data_root, output_dir=args.output_dir, lang=args.finrag_lang, rerank_model=reranker, extractor=extractor, judger=judger, embedding_model=None)
         loader.load_data()
     elif args.benchmark == "docvqa":
         loader = DocVQALoader(data_root=args.data_root, rerank_model=reranker, extractor=extractor)
