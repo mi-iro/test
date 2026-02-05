@@ -1,0 +1,93 @@
+# ==============================================================================
+# 1. 变量定义区 (DEFINITIONS)
+#    这里定义基础变量，支持层级结构。
+#    使用 ${...} 语法进行引用和拼接。
+# ==============================================================================
+defs:
+  # --- 密钥 ---
+  secrets:
+    gen_key: "sk-ohsIxhcDUF0xwqqmFl1L1niRtEOD9LnvxFGjtjakXennNTzI"
+    ext_key: "no-key-required"
+    judge_key: "no-key-required"
+
+  # --- 模型标识 ---
+  models:
+    gen: "gemini-3-pro-preview"
+    ext: "rl_ckpt1400"
+    judge: "sft_ckpt400"
+
+  # --- 路径前缀 (拼接演示) ---
+  roots:
+    mineru2: "/mnt/shared-storage-user/mineru2-shared"
+    mineru3: "/mnt/shared-storage-user/mineru3-share"
+
+  # --- 具体路径 ---
+  paths:
+    # 使用变量拼接完整路径
+    qwen_root:    "${defs.roots.mineru3}/wangzhengren/JIT-RAG/assets/Qwen"
+    finrag_root:  "${defs.roots.mineru2}/jiayu/data/FinRAGBench-V"
+    docvqa_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-DocVQA"
+    mmlong_root:  "${defs.roots.mineru3}/wangzhengren/PageElement/MMLongBench-Doc"
+    vidoseek_root: "${defs.roots.mineru3}/wangzhengren/PageElement/VisRAG/data/EVisRAG-Test-ViDoSeek"
+    mineru: "/root/checkpoints/MinerU2.5-2509-1.2B/"
+
+  # --- 服务地址 ---
+  urls:
+    mineru:  "http://10.102.98.181:8000/"
+    #need start reranker
+    rerank:  "http://10.102.214.86:8000/"
+    extract: "http://10.102.244.38:8001/v1"
+    generate: "http://localhost:3888/v1"
+    judge: "http://10.102.244.38:8003/v1"
+
+# ==============================================================================
+# 2. 实际配置区 (ACTUAL CONFIGURATION)
+#    RunAgent 读取的扁平化参数，直接引用上方的定义。
+# ==============================================================================
+
+benchmark:   finrag
+data_root:   "${defs.paths.finrag_root}"
+finrag_lang: en
+output_dir: "./outputs/results_${benchmark}_${finrag_lang}_${defs.models.gen}"
+
+num_threads: 16
+top_k:       10
+
+use_page:    true
+use_crop:    true
+use_ocr:     true
+use_ocr_raw: true
+trunc_thres: 0.0
+trunc_bbox: false
+
+limit:       null
+infer_only:  false
+force_rebuild_index: false
+max_rounds:  5
+
+evaluation_task: all
+
+# --- 基础模型配置 (LLM & Agent) ---
+
+agent_type: standard
+model_name: "${defs.models.gen}"
+api_key:    "${defs.secrets.gen_key}"
+base_url:   "${defs.urls.generate}"
+
+# --- 检索与 Embedding 配置 (RAG Core) ---
+# 路径拼接示例：在基础路径后追加具体模型文件夹
+embedding_model:   "${defs.paths.qwen_root}/Qwen3-VL-Embedding-8B"
+reranker_model:    "${defs.paths.qwen_root}/Qwen3-VL-Reranker-8B"
+reranker_api_base: "${defs.urls.rerank}"
+reranker_api_key:  EMPTY
+
+# --- MinerU 提取器配置 (Extractor) ---
+extractor_model_name: "${defs.models.ext}"
+extractor_base_url:   "${defs.urls.extract}"
+extractor_api_key:    "${defs.secrets.ext_key}"
+mineru_model_path:    "${defs.paths.mineru}"
+mineru_server_url:    "${defs.urls.mineru}"
+#短暂添加一个judge
+judge_model_name: "${defs.models.judge}"
+judge_base_url:   "${defs.urls.judge}"
+judge_api_key:    "${defs.secrets.judge_key}"

@@ -50,12 +50,14 @@ def extract_pdf_prefix(filename):
     return filename
 
 class FinRAGLoader(BaseDataLoader):
-    def __init__(self, data_root: str, lang: str = "ch", output_dir: str = "./", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None):
+    def __init__(self, data_root: str, lang: str = "ch", output_dir: str = "./", embedding_model=None, rerank_model=None, extractor: Optional[ElementExtractor] = None, judge: Optional[ElementExtractor] = None):
         super().__init__(data_root)
         self.lang = lang.lower()
         self.embedding_model = embedding_model
         self.rerank_model = rerank_model
         self.extractor = extractor
+        #短暂添加一个judge
+        self.judge = judge
         
         # --- 路径配置 ---
         self.query_path = os.path.join(data_root, "data", "queries", f"queries_{self.lang}.json")
@@ -309,7 +311,7 @@ class FinRAGLoader(BaseDataLoader):
         return sorted_pages
 
     def extract_elements_from_pages(self, pages: List[PageElement], query: str) -> List[PageElement]:
-        if self.extractor is None:
+        if self.judge is None or self.extractor is None:
             print("Warning: ElementExtractor is not initialized, skipping fine-grained extraction.")
             return pages 
 
@@ -326,7 +328,8 @@ class FinRAGLoader(BaseDataLoader):
                 continue
 
             try:
-                agent_output = self.extractor.run_agent(
+                #短暂添加一个judge
+                agent_output = self.judge.run_agent(
                     user_text=query,
                     image_paths=[image_path]
                 )
@@ -350,11 +353,50 @@ class FinRAGLoader(BaseDataLoader):
                     if start != -1 and end != -1:
                         json_str = last_msg_content[start:end+1]
 
+                #修改json读取逻辑
+                json_str= json_str.replace("\n", "\\n") 
+                json_str= json_str.replace("\t", "\\t") 
                 try:
                     extracted_data = json.loads(json_str)
                 except json.JSONDecodeError:
                     print(f"JSON Decode Error for page {page.corpus_id}")
                     extracted_data = []
+
+                #短暂添加一个judge，judge不为空才走下面的提取器流程
+                if extracted_data != []:
+                    agent_output = self.extractor.run_agent(
+                    user_text=query,
+                    image_paths=[image_path]
+                )
+                
+                    if not agent_output:
+                        continue
+
+                    predictions = agent_output.get("predictions", [])
+                    if not predictions:
+                        continue
+                    
+                    last_msg_content = predictions[-1].get("content", "")
+                    
+                    json_str = "[]"
+                    match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+                    if match:
+                        json_str = match.group(1).strip()
+                    else:
+                        start = last_msg_content.find('[')
+                        end = last_msg_content.rfind(']')
+                        if start != -1 and end != -1:
+                            json_str = last_msg_content[start:end+1]
+
+                    #修改json读取逻辑
+                    json_str= json_str.replace("\n", "\\n") 
+                    json_str= json_str.replace("\t", "\\t") 
+                    try:
+                        extracted_data = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        print(f"JSON Decode Error for page {page.corpus_id}")
+                        extracted_data = []
+
 
                 if isinstance(extracted_data, list):
                     try:
