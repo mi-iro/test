@@ -188,6 +188,7 @@ MMLONG_EXTRACT_PROMPT_TEMPLATE = """Given the question and analysis, you are tas
 - Please make your response as concise as possible. Also note that your response should be formatted as below:
 
 
+
 ```
 
 Extracted answer: [answer]
@@ -233,10 +234,11 @@ class MMLongLoader(BaseDataLoader):
     用于加载 MMLongBench-Doc 中的 DocVQA 任务数据，并支持基于 LLM 的评估流程。
     """
     
-    def __init__(self, data_root: str, output_dir: str = "./", extractor: Optional[ElementExtractor] = None, reranker: Optional[Qwen3VLReranker] = None):
+    def __init__(self, data_root: str, output_dir: str = "./", extractor: Optional[ElementExtractor] = None, reranker: Optional[Qwen3VLReranker] = None, judger: Optional[ElementExtractor] = None):
         super().__init__(data_root)
         self.extractor = extractor
         self.reranker = reranker # 取消单例，通过初始化注入对象
+        self.judger = judger # 新增 judger
         
         self.json_path = os.path.join(data_root, "data", "samples.json")
         self.doc_dir = os.path.join(data_root, "data", "documents")
@@ -482,6 +484,52 @@ class MMLongLoader(BaseDataLoader):
             print(f"Error during reranking: {e}")
             return pages
 
+    def _execute_agent_and_parse_json(self, agent, query: str, image_path: str, page_id: str = "") -> List[Any]:
+        """
+        Refactored helper function to run an agent (judger or extractor), 
+        extract JSON from its output, and handle parsing errors.
+        """
+        try:
+            agent_output = agent.run_agent(
+                user_text=query,
+                image_paths=[image_path]
+            )
+            
+            if not agent_output:
+                return []
+
+            predictions = agent_output.get("predictions", [])
+            if not predictions:
+                return []
+            
+            last_msg_content = predictions[-1].get("content", "")
+            
+            json_str = "[]"
+            # Try to match markdown json block
+            match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+            if match:
+                json_str = match.group(1).strip()
+            else:
+                # Fallback to finding outermost brackets
+                start = last_msg_content.find('[')
+                end = last_msg_content.rfind(']')
+                if start != -1 and end != -1:
+                    json_str = last_msg_content[start:end+1]
+
+            # Fix common JSON formatting issues in LLM output
+            json_str = json_str.replace("\n", "\\n") 
+            json_str = json_str.replace("\t", "\\t") 
+            
+            extracted_data = json.loads(json_str)
+            return extracted_data
+            
+        except json.JSONDecodeError:
+            print(f"JSON Decode Error for page {page_id}")
+            return []
+        except Exception as e:
+            print(f"Error running agent on {page_id}: {e}")
+            return []
+
     def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10, trunc_thres=0.0, trunc_bbox=False) -> List[PageElement]:
         if self.extractor is None:
             print("Error: ElementExtractor is not initialized in MMLongLoader.")
@@ -532,36 +580,28 @@ class MMLongLoader(BaseDataLoader):
             img_path = page.corpus_path
             
             try:
-                agent_output = self.extractor.run_agent(
-                    user_text=query,
-                    image_paths=[img_path]  
-                )
-                
-                if not agent_output:
-                    continue
-
-                predictions = agent_output.get("predictions", [])
-                if not predictions:
-                    continue
-
-                last_message = predictions[-1]
-                content = last_message.get("content", "")
-
+                # --- Refactored: Use helper function and support Judger ---
                 extracted_data = []
-                try:
-                    json_match = re.search(r'```json(.*?)```', content, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(1).strip()
-                    else:
-                        start = content.find('[')
-                        end = content.rfind(']')
-                        if start != -1 and end != -1:
-                            json_str = content[start:end+1]
-                        else:
-                            json_str = "[]"
-                    extracted_data = json.loads(json_str)
-                except Exception:
-                    extracted_data = []
+                if self.judger is not None:
+                    # 1. Run Judger Agent
+                    extracted_data = self._execute_agent_and_parse_json(
+                        self.judger, query, img_path, page_id=page.corpus_id
+                    )
+
+                    # 2. If Judger returns data, run Extractor Agent
+                    if extracted_data:
+                        extracted_data = self._execute_agent_and_parse_json(
+                            self.extractor, query, img_path, page_id=page.corpus_id
+                        )
+                else:
+                    # Direct Extractor run
+                    extracted_data = self._execute_agent_and_parse_json(
+                        self.extractor, query, img_path, page_id=page.corpus_id
+                    )
+
+                if not extracted_data:
+                    continue
+                # ---------------------------------------------------------
 
                 if isinstance(extracted_data, dict):
                     extracted_data = [extracted_data]
@@ -635,6 +675,7 @@ if __name__ == "__main__":
     )
 
     # 修改：初始化 Loader 时传入对象
+    # 如果有 judger，可以一并传入： loader = MMLongLoader(..., judger=my_judger)
     loader = MMLongLoader(data_root=root_dir, reranker=my_reranker)
     
     try:
