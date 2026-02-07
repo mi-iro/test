@@ -17,6 +17,15 @@ def load_json(file_path):
 
 def draw_bbox_on_image(image_path, bbox):
     """在图片上绘制BBox"""
+    if not image_path:
+        return None, "图片路径为空"
+        
+    # 处理相对路径：如果当前路径找不到，尝试拼接项目根目录
+    if not os.path.exists(image_path):
+        # 假设脚本运行在根目录，尝试直接使用，或者根据实际情况调整
+        # 这里仅作简单的存在性检查
+        pass 
+    
     if not os.path.exists(image_path):
         return None, f"图片文件未找到: {image_path}"
     
@@ -26,6 +35,7 @@ def draw_bbox_on_image(image_path, bbox):
         draw = ImageDraw.Draw(image)
         
         if bbox and len(bbox) == 4:
+            # bbox 格式 [x1, y1, x2, y2] 归一化坐标 (0-1000)
             abs_xmin = (bbox[0] / 1000.0) * width
             abs_ymin = (bbox[1] / 1000.0) * height
             abs_xmax = (bbox[2] / 1000.0) * width
@@ -41,162 +51,188 @@ def draw_bbox_on_image(image_path, bbox):
         return None, f"处理图片时出错: {e}"
 
 def main():
-    st.set_page_config(layout="wide", page_title="RAG 结果可视化")
-    st.title("📊 RAG 实验结果可视化")
+    st.set_page_config(layout="wide", page_title="Bad Case Analysis")
+    st.title("🐞 Bad Case 分析工具")
     
     # --- 侧边栏：配置 ---
-    st.sidebar.header("配置")
-    base_dir = st.sidebar.text_input("JSON文件目录:", value=os.getcwd())
+    st.sidebar.header("📂 数据加载")
+    
+    # 默认路径
+    default_path = os.path.join(os.getcwd(), "output", "bad_cases", "retrieval_bad_cases.json")
+    if not os.path.exists(default_path):
+        default_path = os.getcwd()
+
+    input_path = st.sidebar.text_input("文件路径或目录 (JSON):", value=default_path)
     
     json_files = []
-    if os.path.isdir(base_dir):
-        for root, dirs, files in os.walk(base_dir):
+    
+    # 逻辑判断：是文件还是目录
+    if os.path.isfile(input_path):
+        if input_path.endswith(".json"):
+            json_files = [input_path]
+        else:
+            st.sidebar.error("请选择一个 .json 文件")
+            st.stop()
+    elif os.path.isdir(input_path):
+        for root, dirs, files in os.walk(input_path):
             for file in files:
                 if file.endswith(".json"):
                     json_files.append(os.path.join(root, file))
         json_files.sort()
+        if not json_files:
+            st.sidebar.warning("该目录下没有找到 JSON 文件")
+            st.stop()
     else:
-        st.sidebar.error("无效的目录路径")
-        st.stop()
-        
-    if not json_files:
-        st.sidebar.warning("该目录下没有找到JSON文件")
+        st.sidebar.error(f"路径不存在: {input_path}")
         st.stop()
 
     # --- 状态管理 ---
-    
-    # 1. 初始化索引
     if 'file_index' not in st.session_state:
         st.session_state.file_index = 0
 
-    # 2. 定义回调函数
-    def prev_file():
-        if st.session_state.file_index > 0:
-            st.session_state.file_index -= 1
-            st.session_state.file_selector = json_files[st.session_state.file_index]
-
-    def next_file():
-        if st.session_state.file_index < len(json_files) - 1:
-            st.session_state.file_index += 1
-            st.session_state.file_selector = json_files[st.session_state.file_index]
-
-    def on_selector_change():
-        selected = st.session_state.file_selector
-        if selected in json_files:
-            st.session_state.file_index = json_files.index(selected)
-
-    # 3. 导航按钮区域
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("样本切换")
-    col_prev, col_info, col_next = st.sidebar.columns([1, 2, 1])
-    
-    with col_prev:
-        st.button("⬅️", on_click=prev_file, disabled=(st.session_state.file_index == 0))
-    
-    with col_info:
-        st.markdown(f"<div style='text-align: center; line-height: 2.2;'>{st.session_state.file_index + 1} / {len(json_files)}</div>", unsafe_allow_html=True)
-    
-    with col_next:
-        st.button("➡️", on_click=next_file, disabled=(st.session_state.file_index == len(json_files) - 1))
-
-    # 4. 文件选择框
-    if 'file_selector' not in st.session_state:
-        st.session_state.file_selector = json_files[st.session_state.file_index]
-
-    selected_file = st.sidebar.selectbox(
-        "跳转到文件:", 
+    # 1. 文件选择器（如果是单文件，只有一个选项）
+    file_selector = st.sidebar.selectbox(
+        "选择文件:", 
         json_files,
-        format_func=lambda x: os.path.relpath(x, base_dir),
-        key='file_selector',
-        on_change=on_selector_change
+        format_func=lambda x: os.path.basename(x)
     )
     
-    st.sidebar.markdown("---")
+    # 每次切换文件时，重置索引（可选，取决于用户习惯，这里保持状态可能更好，或者重置为0）
+    # 为了简单起见，如果文件名变了，可以考虑重置，但 Streamlit 的 selectbox 改变会自动重刷页面
+    
+    data_list = load_json(file_selector)
+    if not isinstance(data_list, list):
+        # 兼容旧格式或单样本格式
+        data_list = [data_list] if data_list else []
+    
+    if not data_list:
+        st.warning(f"文件 {os.path.basename(file_selector)} 为空或格式错误")
+        st.stop()
 
+    # --- 样本导航 ---
+    total_samples = len(data_list)
+    st.sidebar.subheader(f"样本列表 ({total_samples})")
+    
+    col_prev, col_info, col_next = st.sidebar.columns([1, 2, 1])
+    
+    # 翻页逻辑
+    with col_prev:
+        if st.button("⬅️") and st.session_state.file_index > 0:
+            st.session_state.file_index -= 1
+    with col_next:
+        if st.button("➡️") and st.session_state.file_index < total_samples - 1:
+            st.session_state.file_index += 1
+            
+    with col_info:
+        st.markdown(f"<div style='text-align: center; line-height: 2.2;'>{st.session_state.file_index + 1} / {total_samples}</div>", unsafe_allow_html=True)
+        
+    # 滑块快速跳转
+    if total_samples > 1:
+        new_index = st.sidebar.slider("跳转索引:", 1, total_samples, st.session_state.file_index + 1) - 1
+        st.session_state.file_index = new_index
+
+    # 确保索引不越界（切换文件后可能发生）
+    if st.session_state.file_index >= total_samples:
+        st.session_state.file_index = 0
+        
+    current_data = data_list[st.session_state.file_index]
+    
+    st.sidebar.divider()
+    
     # --- 内容展示 ---
-    if selected_file:
-        data = load_json(selected_file)
-        if not data:
-            st.stop()
-            
-        # [修改点 1]：更新了标题，包含指标
-        with st.expander("📝 基础信息 & 评估指标 (Metrics & Info)", expanded=True):
-            
-            # [修改点 2]：新增 Metrics 可视化展示
-            metrics = data.get("metrics", {})
-            if metrics:
-                st.markdown("### 📊 核心指标")
-                m1, m2, m3, m4 = st.columns([1, 1, 1, 1])
+    if current_data:
+        metrics = current_data.get("metrics", {})
+        
+        # 1. 顶部状态栏：Bad Case 类型提示
+        # 兼容扁平化 key 和嵌套 key
+        recall = metrics.get('page_recall', metrics.get('page', {}).get('recall', 0.0))
+        model_eval = metrics.get('model_eval', 0.0)
+        
+        is_retrieval_fail = recall < 1.0
+        is_gen_fail = model_eval < 0.5
+        
+        status_cols = st.columns([1, 3])
+        with status_cols[0]:
+            if is_retrieval_fail:
+                st.error("❌ Retrieval Failure")
+            elif is_gen_fail:
+                st.error("❌ Generation Failure")
+            else:
+                st.success("✅ Passed")
                 
-                # Model Eval: 根据数值显示不同颜色（可选优化）
-                eval_score = metrics.get('model_eval', 0)
-                delta_color = "normal"
-                if isinstance(eval_score, (int, float)):
-                    delta_color = "off" if eval_score == 0 else "inverse" # 0为灰色/红色，1为绿色
+        # 2. 指标展示 (Metrics)
+        with st.expander("📊 评估指标详情 (Metrics)", expanded=True):
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("Model Score", f"{model_eval:.2f}")
+            with m2:
+                st.metric("Page Recall", f"{recall:.2%}")
+            with m3:
+                prec = metrics.get('page_precision', metrics.get('page', {}).get('precision', 0.0))
+                st.metric("Page Precision", f"{prec:.2%}")
+            with m4:
+                gold_pages_count = len(current_data.get('gold_pages', []))
+                st.metric("Gold Pages Count", gold_pages_count)
 
-                with m1:
-                    st.metric(
-                        label="Model Eval (评估结果)", 
-                        value=eval_score,
-                        help="0: Incorrect, 1: Correct"
-                    )
-                with m2:
-                    st.metric(
-                        label="Page Recall (页面召回)", 
-                        value=f"{metrics.get('page_recall', 0):.2%}" if isinstance(metrics.get('page_recall'), (int, float)) else metrics.get('page_recall', 'N/A'),
-                        help="Retrieved Pages / Gold Pages"
-                    )
-                with m3:
-                    st.metric(
-                        label="Page Precision (页面精度)", 
-                        value=f"{metrics.get('page_precision', 0):.2%}" if isinstance(metrics.get('page_precision'), (int, float)) else metrics.get('page_precision', 'N/A'),
-                        help="Correct Pages / Retrieved Pages"
-                    )
-                
-                st.divider() # 分割线，将指标与文本信息分开
-
-            # 原有的 Q&A 展示
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**QID:** `{data.get('qid', 'N/A')}`")
-                st.info(f"**Query:**\n\n{data.get('query', 'N/A')}")
-            with col2:
-                st.success(f"**Gold Answer:**\n\n{data.get('gold_answer', 'N/A')}")
-                st.warning(f"**Model Answer:**\n\n{ data.get('final_answer', data.get('model_answer','N/A')) }")
-
-        # 显示对话
-        st.header("💬 对话历史")
-        for idx, msg in enumerate(data.get('messages', [])):
-            with st.chat_message(msg.get('role', 'user')):
-                st.write(f"**[{idx}] {msg.get('role')}**")
-                content = msg.get('content')
-                if isinstance(content, str):
-                    st.markdown(content)
-                elif isinstance(content, list):
-                    for item in content:
-                        if item.get('type') == 'text': st.markdown(item.get('text'))
-                        elif item.get('type') == 'image_url': 
-                            st.image(item['image_url']['url'], width=300)
-
+        # 3. 问答对比
+        st.subheader("📝 Q&A Analysis")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.info(f"**Question (QID: {current_data.get('qid')})**\n\n{current_data.get('query', 'N/A')}")
+            st.markdown(f"**Doc Source:** `{current_data.get('doc_source', 'N/A')}`")
+        with c2:
+            st.success(f"**Gold Answer:**\n\n{current_data.get('gold_answer', 'N/A')}")
+            st.warning(f"**Model Answer:**\n\n{current_data.get('final_answer', 'N/A')}")
+            
         st.divider()
 
-        # 显示检索结果
-        st.header("🔍 检索结果")
-        for i, elem in enumerate(data.get('retrieved_elements', [])):
-            st.subheader(f"Evidence #{i+1}")
-            col_text, col_img = st.columns([1, 1])
+        # 4. 检索证据展示
+        st.subheader("🔍 Retrieved Evidence Analysis")
+        
+        if current_data.get('gold_pages'):
+            st.markdown(f"**Correct Gold Pages:** `{current_data.get('gold_pages')}`")
+
+        retrieved = current_data.get('retrieved_elements', [])
+        if not retrieved:
+            st.write("No elements retrieved.")
+        
+        for i, elem in enumerate(retrieved):
+            # 简单的命中判断逻辑
+            is_hit = False
+            gold_pages = current_data.get('gold_pages', [])
+            page_path = elem.get('corpus_path', '')
+            if page_path and gold_pages:
+                page_name = os.path.basename(page_path)
+                # 模糊匹配：只要 gold_page 字符串出现在路径中就算命中
+                if any(str(g) in page_name for g in gold_pages):
+                    is_hit = True
             
-            with col_text:
-                st.text_area("Content", elem.get('content', ''), height=200, key=f"txt_{i}_{selected_file}")
-                with st.expander("Metadata"):
-                    st.json({k:v for k,v in elem.items() if k not in ['content']})
-            
-            with col_img:
-                if elem.get('corpus_path'):
-                    img, err = draw_bbox_on_image(elem['corpus_path'], elem.get('bbox'))
-                    if img: st.image(img, caption=f"Source: {os.path.basename(elem['corpus_path'])}")
-                    else: st.error(err)
-            st.divider()
+            title_emoji = "✅ Hit" if is_hit else "📄"
+            with st.container():
+                st.markdown(f"#### {title_emoji} Evidence #{i+1}")
+                col_text, col_img = st.columns([1, 1])
+                
+                with col_text:
+                    content_preview = elem.get('content', '')
+                    st.text_area("Content", content_preview, height=200, key=f"txt_{i}_{st.session_state.file_index}")
+                    
+                    # Metadata 展示
+                    meta_show = {k:v for k,v in elem.items() if k != 'content'}
+                    with st.expander("Metadata"):
+                        st.json(meta_show)
+                
+                with col_img:
+                    path = elem.get('corpus_path') or elem.get('crop_path')
+                    if path:
+                        # 尝试加载图片
+                        img, err = draw_bbox_on_image(path, elem.get('bbox'))
+                        if img: 
+                            st.image(img, caption=f"File: {os.path.basename(path)}")
+                        else: 
+                            st.error(f"Image Load Error: {err}")
+                    else:
+                        st.warning("No image path found in element.")
+                st.divider()
 
 if __name__ == "__main__":
     main()

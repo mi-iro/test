@@ -2,9 +2,96 @@
 
 import json
 import os
+import collections
 from bootstrap import parse_args, initialize_components, save_run_config
 from src.loaders.base_loader import PageElement
 from src.utils.llm_helper import create_llm_caller
+
+def serialize_element(elem):
+    """Helper to convert PageElement or dict to JSON-serializable dict"""
+    if isinstance(elem, dict):
+        return elem
+    if hasattr(elem, '__dict__'):
+        return elem.__dict__
+    return str(elem)
+
+def save_bad_cases(loader, output_dir, task):
+    """
+    Filter and save bad cases based on evaluation metrics.
+    """
+    bad_case_dir = os.path.join(output_dir, "bad_cases")
+    os.makedirs(bad_case_dir, exist_ok=True)
+
+    retrieval_bad_cases = []
+    generation_bad_cases = []
+
+    print(f"🔍 Analyzing {len(loader.samples)} samples for bad cases...")
+
+    for sample in loader.samples:
+        if sample.extra_info is None:
+            continue
+        
+        metrics = sample.extra_info.get('metrics', {})
+        
+        # Flatten metrics for easier consumption in case_study.py
+        # Loader structure: metrics['page'] = {'recall': x, ...}
+        # Target structure: metrics['page_recall'] = x
+        flat_metrics = metrics.copy()
+        
+        if 'page' in metrics and isinstance(metrics['page'], dict):
+            flat_metrics['page_recall'] = metrics['page'].get('recall', 0.0)
+            flat_metrics['page_precision'] = metrics['page'].get('precision', 0.0)
+        
+        # 1. Retrieval Bad Case Check
+        # Criteria: Recall < 1.0 (some gold pages missed)
+        is_retrieval_bad = False
+        if 'page_recall' in flat_metrics and flat_metrics['page_recall'] < 1.0:
+            is_retrieval_bad = True
+        elif 'page' in metrics and metrics['page'].get('recall', 1.0) < 1.0:
+            # Double check raw structure
+            is_retrieval_bad = True
+            flat_metrics['page_recall'] = metrics['page'].get('recall')
+            flat_metrics['page_precision'] = metrics['page'].get('precision')
+
+        # 2. Generation Bad Case Check
+        # Criteria: model_eval < 1.0 (answer not perfect)
+        is_generation_bad = False
+        if 'model_eval' in metrics and metrics['model_eval'] < 1.0:
+            is_generation_bad = True
+
+        # Construct Serializable Sample Object
+        # We assume retrieving 'final_answer' and 'retrieved_elements' from extra_info
+        
+        sample_dict = {
+            "qid": str(sample.qid),
+            "query": sample.query,
+            "gold_answer": sample.gold_answer,
+            "gold_pages": sample.gold_pages,
+            "final_answer": sample.extra_info.get("final_answer", ""),
+            "metrics": flat_metrics, # Use flattened metrics
+            "retrieved_elements": [serialize_element(e) for e in sample.extra_info.get("retrieved_elements", [])],
+            "doc_source": sample.data_source
+        }
+
+        if is_retrieval_bad:
+            retrieval_bad_cases.append(sample_dict)
+        
+        if is_generation_bad:
+            generation_bad_cases.append(sample_dict)
+
+    # Save files
+    if task in ["retrieval", "all"] and retrieval_bad_cases:
+        p = os.path.join(bad_case_dir, "retrieval_bad_cases.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(retrieval_bad_cases, f, indent=2, ensure_ascii=False)
+        print(f"📉 Saved {len(retrieval_bad_cases)} retrieval bad cases to {p}")
+
+    if task in ["generation", "all"] and generation_bad_cases:
+        p = os.path.join(bad_case_dir, "generation_bad_cases.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(generation_bad_cases, f, indent=2, ensure_ascii=False)
+        print(f"📉 Saved {len(generation_bad_cases)} generation bad cases to {p}")
+
 
 def main():
     args = parse_args()
@@ -39,7 +126,6 @@ def main():
     results_map = {str(item['qid']): item for item in results_data}
     
     matched_count = 0
-    # 注意：这里需要确保 qid 类型一致（str vs int）
     for sample in loader.samples:
         s_qid = str(sample.qid)
         if s_qid in results_map:
@@ -50,6 +136,7 @@ def main():
             if 'retrieved_elements' in res:
                 sample.extra_info['retrieved_elements'] = res['retrieved_elements']
             
+            # Map answer keys
             if 'model_answer' in res:
                 sample.extra_info['final_answer'] = res['model_answer']
             elif 'final_answer' in res: 
@@ -62,8 +149,6 @@ def main():
     final_metrics = {}
 
     # 3. 执行评估
-    # 注意：评估通常涉及全集统计计算（如 Recall@K），难以简单并行化单个样本；
-    # 若 Loader 内部实现了 evaluate_generation 的 LLM Judge 并行，则会自动生效。
     
     # Task: Retrieval
     if args.evaluation_task in ["retrieval", "all"]:
@@ -95,6 +180,11 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_metrics, f, indent=2)
     print(f"\n💾 All metrics saved to {output_path}")
+
+    # 5. 分析并保存 Bad Cases (NEW)
+    print("\n--- Saving Bad Cases for Analysis ---")
+    save_bad_cases(loader, args.output_dir, args.evaluation_task)
+
 
 if __name__ == "__main__":
     main()

@@ -63,22 +63,22 @@ if __name__ == "__main__":
         },
         {
             # 注意：确保服务器端能访问此路径，或者使用 URL
-            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
+            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/.vscode/Qwen3-VL-Embedding/demo.jpeg"
         },
         {
             "text": "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust.",
-            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/Qwen3-VL-Embedding/demo.jpeg"
+            "image": "/mnt/shared-storage-user/mineru3-share/wangzhengren/PageElement/.vscode/Qwen3-VL-Embedding/demo.jpeg"
         }
     ]
     
-    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/FATF：2024年萨尔瓦多打击洗钱和恐怖主义融资的措施报告（英文版）_{i}.png"} for i in range(1,203)]
-    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/PROXY Print Set FINAL (no blank pages) pdfs_Current_Folio_Proxy_tmbsf_v3_F_{i}.png"} for i in range(1,68)]
-    docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/巩固复苏：抓住绿色增长机会（英文版）_{i}.png"} for i in range(1,26)]
+    # docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/FATF：2024年萨尔瓦多打击洗钱和恐怖主义融资的措施报告（英文版）_{i}.png"} for i in range(1,203)]
+    # docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/PROXY Print Set FINAL (no blank pages) pdfs_Current_Folio_Proxy_tmbsf_v3_F_{i}.png"} for i in range(1,68)]
+    # docs = [{"image": f"/mnt/shared-storage-user/mineru2-shared/jiayu/data/FinRAGBench-V/data/corpus/en/img/巩固复苏：抓住绿色增长机会（英文版）_{i}.png"} for i in range(1,26)]
     
     test_inputs = {
         "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
         "query": {
-            "text": "Based on the commodity prices of Emerging Market Bond Index (EMBI) Global Sovereign Spreads, which commodity is the highest on 7-March-2022?"
+            "text": "A woman playing with her dog on a beach at sunset."
         },
         "documents": docs,
         "fps": 1.0
