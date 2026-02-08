@@ -3,6 +3,7 @@ import json
 import os
 from PIL import Image, ImageDraw
 import warnings
+import numpy as np
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -19,23 +20,19 @@ def draw_bbox_on_image(image_path, bbox):
     """在图片上绘制BBox"""
     if not image_path:
         return None, "图片路径为空"
-        
-    # 处理相对路径：如果当前路径找不到，尝试拼接项目根目录
-    if not os.path.exists(image_path):
-        # 假设脚本运行在根目录，尝试直接使用，或者根据实际情况调整
-        # 这里仅作简单的存在性检查
-        pass 
     
     if not os.path.exists(image_path):
         return None, f"图片文件未找到: {image_path}"
     
     try:
-        image = Image.open(image_path).convert("RGB")
+        # 使用 with 语句确保文件句柄被正确关闭
+        with Image.open(image_path) as f:
+            image = f.convert("RGB")
+            
         width, height = image.size
         draw = ImageDraw.Draw(image)
         
         if bbox and len(bbox) == 4:
-            # bbox 格式 [x1, y1, x2, y2] 归一化坐标 (0-1000)
             abs_xmin = (bbox[0] / 1000.0) * width
             abs_ymin = (bbox[1] / 1000.0) * height
             abs_xmax = (bbox[2] / 1000.0) * width
@@ -214,7 +211,7 @@ def main():
                 
                 with col_text:
                     content_preview = elem.get('content', '')
-                    st.text_area("Content", content_preview, height=200, key=f"txt_{i}_{st.session_state.file_index}")
+                    st.markdown("**Content**\n\n" +  content_preview)
                     
                     # Metadata 展示
                     meta_show = {k:v for k,v in elem.items() if k != 'content'}
@@ -227,11 +224,13 @@ def main():
                         # 尝试加载图片
                         img, err = draw_bbox_on_image(path, elem.get('bbox'))
                         if img: 
-                            st.image(img, caption=f"File: {os.path.basename(path)}")
+                            # 核心修复：转为 numpy
+                            st.image(
+                                np.array(img), 
+                                caption=f"File: {os.path.basename(path)}",
+                            )
                         else: 
                             st.error(f"Image Load Error: {err}")
-                    else:
-                        st.warning("No image path found in element.")
                 st.divider()
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+[server]
+headless = true
+address = "127.0.0.1"  # 注意：如果你需要从外部浏览器访问，这里建议改为 "0.0.0.0"
+
+[browser]
+gatherUsageStats = false
