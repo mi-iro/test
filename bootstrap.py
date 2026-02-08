@@ -5,6 +5,7 @@ import os
 import sys
 import torch
 import yaml
+import json  # Added import
 import datetime
 from omegaconf import OmegaConf
 
@@ -34,6 +35,9 @@ def get_common_parser():
     parser.add_argument("--data_root", type=str, default=None, help="Dataset root.")
     parser.add_argument("--output_dir", type=str, default=None, help="Directory to save results.")
     
+    # Added Filter Argument
+    parser.add_argument("--filter", type=str, default=None, help="Path to a bad_case file (JSON) or list of QIDs to filter the run.")
+
     # Model & API
     parser.add_argument("--model_name", type=str, default="qwen2.5-72b-instruct")
     parser.add_argument("--base_url", type=str, default="http://localhost:3888/v1")
@@ -113,6 +117,46 @@ def save_run_config(args, stage_name="run"):
     except Exception as e:
         print(f"⚠️ Failed to save configuration: {e}")
 
+def apply_qid_filter(items, filter_path, key='qid'):
+    """
+    通用过滤函数，用于根据 bad_case 文件过滤列表。
+    items: list of dicts or list of objects
+    filter_path: path to json file
+    """
+    if not filter_path or not os.path.exists(filter_path):
+        return items
+    
+    print(f"🧹 Applying filter from: {filter_path}")
+    try:
+        with open(filter_path, 'r', encoding='utf-8') as f:
+            filter_data = json.load(f)
+        
+        target_qids = set()
+        for item in filter_data:
+            if isinstance(item, dict) and 'qid' in item:
+                target_qids.add(str(item['qid']))
+            elif isinstance(item, (str, int)):
+                target_qids.add(str(item))
+                
+        # items can be a list of objects (with .qid) or dicts (with ['qid'])
+        filtered_items = []
+        for item in items:
+            # Check if item is object or dict
+            item_qid = None
+            if isinstance(item, dict):
+                item_qid = item.get(key)
+            elif hasattr(item, key):
+                item_qid = getattr(item, key)
+            
+            if str(item_qid) in target_qids:
+                filtered_items.append(item)
+                
+        print(f"   Reduced items from {len(items)} to {len(filtered_items)}")
+        return filtered_items
+    except Exception as e:
+        print(f"⚠️ Filter error: {e}")
+        return items
+
 def initialize_components(args, init_retriever=True, init_generator=True):
     """
     初始化 Loader, Reranker, Agent 等组件
@@ -166,10 +210,11 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         loader.load_data()
     else:
         raise NotImplementedError
-    # elif args.benchmark == "docvqa":
-    #     loader = DocVQALoader(data_root=args.data_root, rerank_model=reranker, extractor=extractor)
-    #     loader.load_data()
     
+    # Apply Filter (NEW)
+    if args.filter:
+        loader.samples = apply_qid_filter(loader.samples, args.filter)
+
     if args.limit and args.limit > 0:
         loader.samples = loader.samples[:args.limit]
 

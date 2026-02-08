@@ -4,7 +4,8 @@ import os
 import time
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from bootstrap import parse_args, initialize_components, save_run_config
+# Update import
+from bootstrap import parse_args, initialize_components, save_run_config, apply_qid_filter
 from src.loaders.base_loader import PageElement
 
 def process_single_sample_generation(item, agent, cache_dir):
@@ -72,6 +73,10 @@ def main():
     with open(retrieval_file, 'r', encoding='utf-8') as f:
         data_items = json.load(f)
     
+    # Apply Filter (NEW)
+    if args.filter:
+        data_items = apply_qid_filter(data_items, args.filter)
+
     # 准备缓存目录
     cache_dir = os.path.join(args.output_dir, "cache_generation_results")
     os.makedirs(cache_dir, exist_ok=True)
