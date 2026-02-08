@@ -704,7 +704,7 @@ class MMLongLoader(BaseDataLoader):
                         last_msg_content, extracted_data = self._execute_agent_and_parse_json(
                                 self.extractor, query, img_path, page_id=page.corpus_id
                             )
-                        if self.is_valid_extracted_data(extracted_data):
+                        if self.is_valid_extracted_data(extracted_data) and (retry>1 or extracted_data!=[]):
                             break
                         retry += 1
 
