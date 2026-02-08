@@ -706,6 +706,7 @@ class MMLongLoader(BaseDataLoader):
                             )
                         if self.is_valid_extracted_data(extracted_data):
                             break
+                        retry += 1
 
                     if not self.is_valid_extracted_data(extracted_data):
                         extracted_data = []
