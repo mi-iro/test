@@ -110,6 +110,9 @@ class ElementExtractor:
         try:
             with Image.open(image_path) as img:
                 width, height = img.size
+                
+                if width >3000 or height>3000:
+                    mode == "keep_ratio"
 
                 if mode == "keep_ratio":
                     if max(width, height) > self.max_image_size:
