@@ -530,9 +530,15 @@ class MMLongLoader(BaseDataLoader):
         if not self.reranker or not pages:
             return pages
             
-        documents_input = [{"image": page.crop_path} for page in pages]
+        documents_input = [{"text": f"Page ID: {page.corpus_id}", "image": page.crop_path} for page in pages]
         rerank_input = {
-            "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
+            # "instruction": "Given a search query, retrieve relevant candidates that answer the query.",
+            # "instruction": "Given a search query, retrieve relevant candidates that answer the query considering both the visual content and the page metadata.",
+            "instruction": (
+                "Given a search query, retrieve relevant candidates that answer the query. "
+                "Note that 'Page ID' indicates the physical page index in the document file, "
+                "which does not necessarily correspond to the logical page number printed on the page image."
+            ),
             "query": {"text": query},
             "documents": documents_input,
             "fps": 1.0 
@@ -661,6 +667,36 @@ class MMLongLoader(BaseDataLoader):
         if self.reranker and len(candidate_pages) > top_k:
             ranked_pages = self.rerank(query, candidate_pages)
             target_pages = ranked_pages[:top_k]
+
+            # --- Expansion Recall Logic ---
+            # Create a new list for expanded pages to avoid modifying list while iterating (though appending is usually safe, creating new is cleaner)
+            expanded_target_pages = list(target_pages)
+            existing_ids = set([p.corpus_id for p in target_pages])
+            
+            # Map corpus_id to index in candidate_pages (which preserves document order)
+            id_to_idx = {p.corpus_id: i for i, p in enumerate(candidate_pages)}
+            
+            for page in target_pages:
+                if page.corpus_id in id_to_idx:
+                    curr_idx = id_to_idx[page.corpus_id]
+                    
+                    # Check previous page
+                    if curr_idx > 0:
+                        prev_page = candidate_pages[curr_idx - 1]
+                        if prev_page.corpus_id not in existing_ids:
+                            expanded_target_pages.append(prev_page)
+                            existing_ids.add(prev_page.corpus_id)
+                    
+                    # Check next page
+                    if curr_idx < len(candidate_pages) - 1:
+                        next_page = candidate_pages[curr_idx + 1]
+                        if next_page.corpus_id not in existing_ids:
+                            expanded_target_pages.append(next_page)
+                            existing_ids.add(next_page.corpus_id)
+            
+            target_pages = expanded_target_pages
+            # -----------------------------
+
             target_pages = [ page for page in target_pages if page.retrieval_score >= trunc_thres]
         else:
             target_pages = candidate_pages[:top_k]
