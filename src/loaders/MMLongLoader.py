@@ -559,23 +559,40 @@ class MMLongLoader(BaseDataLoader):
         extract JSON from its output, and handle parsing errors.
         """
         try:
-            agent_output = agent.run_agent(
-                user_text=query,
-                image_paths=[image_path]
-            )
-            
-            if not agent_output:
-                return []
+            max_retry = 5
+            retry_count = 0
+            predictions = []
 
-            predictions = agent_output.get("predictions", [])
-            if not predictions:
-                return []
+            while retry_count < max_retry:
+                agent_output = agent.run_agent(
+                    user_text=query,
+                    image_paths=[image_path]
+                )
+
+                if not agent_output:
+                    return 111, [1, 1]
+
+                predictions = agent_output.get("predictions", [])
+                if not predictions:
+                    return 111, [1, 1]
+
+                all_text = "".join(
+                        item.get("content", "")
+                        for item in predictions
+                        if isinstance(item, dict)
+                    )
+
+                # 判断长度是否过大
+                if len(all_text) <= 40000:
+                    break  # 正常结果，退出重试循环
+
+                retry_count += 1
             
             last_msg_content = predictions[-1].get("content", "")
-            
-            json_str = "[]"
+            #print(last_msg_content)
+            #json_str = "[]"
             # Try to match markdown json block
-            match = re.search(r'```json(.*?)```', last_msg_content, re.DOTALL)
+            match = re.search(r"```json\s*(.*?)\s*```", last_msg_content, re.DOTALL)
             if match:
                 json_str = match.group(1).strip()
             else:
@@ -584,21 +601,33 @@ class MMLongLoader(BaseDataLoader):
                 end = last_msg_content.rfind(']')
                 if start != -1 and end != -1:
                     json_str = last_msg_content[start:end+1]
-
-            # Fix common JSON formatting issues in LLM output
-            json_str = json_str.replace("\n", "\\n") 
-            json_str = json_str.replace("\t", "\\t") 
             
-            extracted_data = json.loads(json_str)
-            return extracted_data
+
+            or_json_str = json_str
+            try:
+                extracted_data = json.loads(json_str)
+            # Fix common JSON formatting issues in LLM output
+            except:
+                json_str = json_str.replace("\n", "\\n") 
+                json_str = json_str.replace("\t", "\\t") 
+                try:
+                    extracted_data = json.loads(json_str)
+                except:
+                    json_str = or_json_str.replace("\\", "\\\\")
+                    extracted_data = json.loads(json_str)
+            return last_msg_content,extracted_data
             
         except json.JSONDecodeError:
             print(f"JSON Decode Error for page {page_id}")
-            return []
+            return last_msg_content,[1,1]
         except Exception as e:
             print(f"Error running agent on {page_id}: {e}")
-            return []
+            return last_msg_content,[1,1]
 
+    def is_valid_extracted_data(self,data):
+        if not isinstance(data, list):
+            return False
+        return all(isinstance(item, dict) for item in data)
     def pipeline(self, query: str, image_paths: List[str] = None, top_k: int = 10, trunc_thres=0.0, trunc_bbox=False) -> List[PageElement]:
         if not image_paths:
             return []
@@ -646,26 +675,41 @@ class MMLongLoader(BaseDataLoader):
 
         for page in target_pages:
             img_path = page.corpus_path
-            
+            MAX_RETRY = 5
+            retry = 0
             try:
                 # --- Refactored: Use helper function and support Judger ---
                 extracted_data = []
                 if self.judger is not None:
                     # 1. Run Judger Agent
-                    extracted_data = self._execute_agent_and_parse_json(
+                    last_msg_content, extracted_data = self._execute_agent_and_parse_json(
                         self.judger, query, img_path, page_id=page.corpus_id
                     )
 
                     # 2. If Judger returns data, run Extractor Agent
                     if extracted_data:
-                        extracted_data = self._execute_agent_and_parse_json(
-                            self.extractor, query, img_path, page_id=page.corpus_id
-                        )
+                        while retry < MAX_RETRY:
+                            last_msg_content, extracted_data = self._execute_agent_and_parse_json(
+                                self.extractor, query, img_path, page_id=page.corpus_id
+                            )
+                            if self.is_valid_extracted_data(extracted_data) and extracted_data !=[]:
+                                break
+                            retry += 1
+
+                    if not self.is_valid_extracted_data(extracted_data):
+                        extracted_data = []
                 else:
                     # Direct Extractor run
-                    extracted_data = self._execute_agent_and_parse_json(
-                        self.extractor, query, img_path, page_id=page.corpus_id
-                    )
+                    while retry < MAX_RETRY:
+                        last_msg_content, extracted_data = self._execute_agent_and_parse_json(
+                                self.extractor, query, img_path, page_id=page.corpus_id
+                            )
+                        if self.is_valid_extracted_data(extracted_data) and (retry>1 or extracted_data!=[]):
+                            break
+                        retry += 1
+
+                    if not self.is_valid_extracted_data(extracted_data):
+                        extracted_data = []
 
                 if not extracted_data:
                     continue
