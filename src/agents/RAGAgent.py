@@ -181,17 +181,30 @@ class RAGAgent:
     def build_context_message(self, elements: List[PageElement]) -> List[Dict[str, Any]]:
         """
         保持原有的 Context 构建逻辑不变。
+        Modified: 按照页面文件名 (page_xx.png) 中的数字顺序组织上下文。
         """
         content_list = []
         content_list.append({"type": "text", "text": "Here is the retrieved context/evidence from the documents, grouped by page:\n"})
         
         pages_map = defaultdict(list)
-        page_order = []
         
+        # 将元素按页面路径分组
         for el in elements:
-            if el.corpus_path not in pages_map:
-                page_order.append(el.corpus_path)
             pages_map[el.corpus_path].append(el)
+            
+        # 定义提取页码的辅助函数 (格式: .../page_xx.png)
+        def get_page_number(path: str) -> int:
+            try:
+                filename = os.path.basename(path)
+                name_no_ext = os.path.splitext(filename)[0] # page_xx
+                num_part = name_no_ext.split('_')[-1]       # xx
+                return int(num_part)
+            except (ValueError, IndexError, AttributeError):
+                return 999999 # 无法解析时放到最后
+
+        # 对页面路径进行排序
+        page_order = sorted(pages_map.keys(), key=get_page_number)
+        # print(page_order)
             
         bbox_extractor = MinerUBboxExtractor() if self.use_ocr_raw else None
         
