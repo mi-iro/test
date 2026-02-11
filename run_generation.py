@@ -23,7 +23,10 @@ def process_single_sample_generation(item, agent, cache_dir):
     if os.path.exists(cache_path):
         try:
             with open(cache_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                cached_item = json.load(f)
+                if ("Error during generation" not in cached_item['model_answer']) and (not cached_item['model_answer'].startswith("Error")):
+                    # print(cached_item['model_answer'])
+                    return cached_item
         except Exception:
             pass
 
@@ -44,7 +47,7 @@ def process_single_sample_generation(item, agent, cache_dir):
         item['messages'] = gen_output['messages']
     except Exception as e:
         print(f"Error generating for {qid}: {e}")
-        item['model_answer'] = "Error"
+        item['model_answer'] = "Error during generation."
         item['messages'] = []
 
     # 3. Save Cache
