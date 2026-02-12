@@ -48,8 +48,8 @@ max_rounds: 5
 mineru_model_path: /root/checkpoints/MinerU2.5-2509-1.2B/
 mineru_server_url: http://10.102.98.181:8000/
 model_name: gemini-2.5-pro
-num_threads: 16
-output_dir: outputs/mmlong_filter0212_prompt2
+num_threads: 24
+output_dir: outputs/mmlong_filter0212_prompt3
 reranker_api_base: http://localhost:8000/
 reranker_api_key: EMPTY
 reranker_model: /mnt/shared-storage-user/mineru3-share/wangzhengren/JIT-RAG/assets/Qwen/Qwen3-VL-Reranker-8B

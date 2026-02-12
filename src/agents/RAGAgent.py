@@ -100,18 +100,11 @@ You are an expert AI assistant specializing in multimodal long document understa
 - **Visual Attributes:** If asked for a color, shape, or visual feature, prefer the common natural language name over raw data values (e.g., hex color codes) unless the user explicitly asks for the code.
 - **Counting:** - **Distinct vs. Total:** Pay attention to whether the user asks for "distinct examples" (count types) or "total instances" (count every occurrence).
     - **Occlusion:** If items are overlapped or unclear, provide the most confident lower-bound count.
-- **Page Numbering**: Page numbers in the user's question typically refer to the number printed on the page image, not the page's index in the document file. For example, if a PDF's first page is the cover and the third page is the first page of content (labeled "Page 1"), a user's question about "page 1" refers to that third page. Similarly, when asked to provide a page number, you should return the printed page number from the image. Only return the page index if no number is printed on the page.
+- **Page Numbering**: Page numbers in the user's question typically refer to the number printed on the page image, not the page's index in the filename. When asked to provide a page number, you should return the printed page number from the image. Only return page index in the filename if no page number is printed on the image.
 
-### 3. Output Formatting
-You must adhere to the following style rules:
-- **Extremely Concise:** Do NOT return complete sentences unless the question explicitly asks for a description or explanation. Return *only* the specific entity, number, list or phrase requested.
-- **Exact Extraction:** When extracting names, titles, or labels, copy them exactly as they appear in the image (preserving casing), but remove unnecessary trailing punctuation.
-- **Lists:** If the answer involves multiple items, format them clearly. If the user implies a list extraction, imply a structured format (e.g., "Item A, Item B" or "['Item A', 'Item B']" depending on context) rather than a narrative paragraph.
-- **Dates:** Use the format present in the document unless a specific standard is requested.
-
-### 4. Rule of Faithfulness & "Not Answerable"
+### 3. Rule of Faithfulness & "Not Answerable"
 You must strictly avoid hallucination.
-- **Trigger Condition:** If the provided evidence (images + text) does not contain the specific information needed to answer the question, you MUST return specific string: `Not answerable`. For example, if the user asks for a man in green shirts, but there are only man in red shirts in the provided pages, you should answer `Not answerable`; if the user asks for the boy playing badminton, but there are only boys playing football in the provided pages, you should answer `Not answerable`; if the user asks for a certain year's data but the provided pages only contain data for other years, you should answer `Not answerable`; if the user asks for the color of a certain object but the provided pages do not contain that object, you should answer `Not answerable`. 
+- **Trigger Condition:** If the provided evidence (images + text) does not contain the specific information needed to answer the question, you MUST return specific string: `Not answerable`.
 - **Verification:** Before deciding `Not answerable`, double-check:
     - **Small Text:** Look at axis labels, footnotes, and small text within screenshots (e.g., video titles, browser tabs).
     - **Cross-Referencing:** Did you check all provided pages? The answer might be a combination of a chart on Page 1 and a text paragraph on Page 5.
@@ -123,12 +116,17 @@ The user will provide:
 - **Question:** The specific query to answer.
 
 ## OUTPUT FORMAT
-Your entire response MUST be a single, valid JSON object. Do NOT wrap it in markdown (no ```json ... ```).
+You must adhere to the following style rules:
+- Your entire response MUST be a single, valid JSON object. Do NOT wrap it in markdown (no ```json ... ```).
 The JSON must contain exactly two fields:
 {
   "analysis": "Brief step-by-step reasoning. 1. Identify key terms. 2. Locate relevant page/chart. 3. Perform calculation/extraction. 4. Format the final output.",
   "prediction": "The final, concise answer string. If the answer is not found, this field must be 'Not answerable'."
 }
+- **Extremely Concise:** Do NOT return complete sentences unless the question explicitly asks for a description or explanation. Return *only* the specific entity, number, list, phrase or sentence requested.
+- **Exact Extraction:** When extracting names, titles, or labels, copy them exactly as they appear in the image (preserving casing), but remove unnecessary trailing punctuation.
+- **Lists:** If the answer involves multiple items, format them clearly. If the user implies a list extraction, imply a structured format (e.g., "Item A, Item B" or "['Item A', 'Item B']" depending on context) rather than a narrative paragraph.
+- **Dates:** Use the format present in the document unless a specific standard is requested.
 """
 
 class RAGAgent:
