@@ -5,7 +5,7 @@ import os
 import sys
 import torch
 import yaml
-import json  # Added import
+import json
 import datetime
 from omegaconf import OmegaConf
 
@@ -37,6 +37,9 @@ def get_common_parser():
     
     # Added Filter Argument
     parser.add_argument("--filter", type=str, default=None, help="Path to a bad_case file (JSON) or list of QIDs to filter the run.")
+
+    # Added RAG System Prompt Argument
+    parser.add_argument("--rag_system_prompt", type=str, default=None, help="Path to the system prompt file or the prompt string itself.")
 
     # Model & API
     parser.add_argument("--model_name", type=str, default="qwen2.5-72b-instruct")
@@ -218,6 +221,21 @@ def initialize_components(args, init_retriever=True, init_generator=True):
     if args.limit and args.limit > 0:
         loader.samples = loader.samples[:args.limit]
 
+    # Handle Custom System Prompt
+    system_prompt_content = None
+    if args.rag_system_prompt:
+        if os.path.exists(args.rag_system_prompt):
+            print(f"📄 Loading RAG System Prompt from file: {args.rag_system_prompt}")
+            try:
+                with open(args.rag_system_prompt, 'r', encoding='utf-8') as f:
+                    system_prompt_content = f.read()
+            except Exception as e:
+                print(f"⚠️ Error reading system prompt file: {e}")
+                system_prompt_content = None
+        else:
+            print("📝 Using provided RAG System Prompt string.")
+            system_prompt_content = args.rag_system_prompt
+
     # 4. Agent
     agent = RAGAgent(
         loader=loader,
@@ -231,7 +249,8 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         use_ocr=args.use_ocr,
         use_ocr_raw=args.use_ocr_raw,
         trunc_thres=args.trunc_thres,
-        trunc_bbox=args.trunc_bbox
+        trunc_bbox=args.trunc_bbox,
+        system_prompt=system_prompt_content  # Pass the prompt here
     )
 
     return agent, loader
