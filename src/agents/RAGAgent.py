@@ -126,10 +126,11 @@ class RAGAgent:
         use_crop: bool = True,
         use_ocr: bool = True,
         use_ocr_raw: bool = False,
+        use_ocr_both: bool = False, # Added new parameter
         max_page_pixels: int = 1024 * 1024,
         trunc_thres: float = 0.0,
         trunc_bbox: bool = False,
-        system_prompt: Optional[str] = None, # 新增参数
+        system_prompt: Optional[str] = None, 
         **kwargs
     ):
         self.loader = loader
@@ -142,6 +143,7 @@ class RAGAgent:
         self.use_crop = use_crop
         self.use_ocr = use_ocr
         self.use_ocr_raw = use_ocr_raw
+        self.use_ocr_both = use_ocr_both # Added new parameter
         self.max_page_pixels = max_page_pixels
         self.trunc_thres = trunc_thres
         self.trunc_bbox = trunc_bbox
@@ -212,6 +214,7 @@ class RAGAgent:
         """
         保持原有的 Context 构建逻辑不变。
         Modified: 按照页面文件名 (page_xx.png) 中的数字顺序组织上下文。
+        Modified: 增加 use_ocr_both 支持，同时包含 Model OCR 和 Raw OCR。
         """
         content_list = []
         content_list.append({"type": "text", "text": "Here is the retrieved context/evidence from the documents, grouped by page:\n"})
@@ -234,9 +237,9 @@ class RAGAgent:
 
         # 对页面路径进行排序
         page_order = sorted(pages_map.keys(), key=get_page_number)
-        # print(page_order)
-            
-        bbox_extractor = MinerUBboxExtractor() if self.use_ocr_raw else None
+        
+        # 如果启用了 raw OCR 或 both OCR，初始化提取器
+        bbox_extractor = MinerUBboxExtractor() if (self.use_ocr_raw or self.use_ocr_both) else None
         
         for p_idx, page_path in enumerate(page_order):
             page_elements = pages_map[page_path]
@@ -252,7 +255,16 @@ class RAGAgent:
 
             for i, el in enumerate(page_elements):
                 if el.type == "page_image":
-                    if self.use_ocr:
+                    if self.use_ocr_both:
+                        # 1. Model OCR Content
+                        if el.content:
+                            content_list.append({"type": "text", "text": f"Model OCR Content: {el.content}\n"})
+                        # 2. Raw OCR Content
+                        if bbox_extractor:
+                            raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
+                            if raw_content:
+                                content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                    elif self.use_ocr:
                         text_content = ""
                         if self.use_ocr_raw and bbox_extractor:
                             el.raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
@@ -274,7 +286,16 @@ class RAGAgent:
                             content_list.append({"type": "text", "text": "Region Detail:\n"})
                             content_list.append({"type": "image_url", "image_url": {"url": img_url}})
                 
-                if self.use_ocr:
+                if self.use_ocr_both:
+                    # 1. Model OCR Content
+                    if el.content:
+                        content_list.append({"type": "text", "text": f"Model OCR Content: {el.content}\n"})
+                    # 2. Raw OCR Content
+                    if bbox_extractor:
+                        raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
+                        if raw_content:
+                            content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                elif self.use_ocr:
                     text_content = ""
                     if self.use_ocr_raw and bbox_extractor:
                         el.raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)

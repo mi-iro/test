@@ -72,6 +72,7 @@ def get_common_parser():
     parser.add_argument("--use_crop", action="store_true")
     parser.add_argument("--use_ocr", action="store_true")
     parser.add_argument("--use_ocr_raw", action="store_true")
+    parser.add_argument("--use_ocr_both", action="store_true") # Added new argument
     
     # Limit & Threading
     parser.add_argument("--limit", type=int, default=None)
@@ -248,6 +249,7 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         use_crop=args.use_crop,
         use_ocr=args.use_ocr,
         use_ocr_raw=args.use_ocr_raw,
+        use_ocr_both=args.use_ocr_both, # Passed new argument
         trunc_thres=args.trunc_thres,
         trunc_bbox=args.trunc_bbox,
         system_prompt=system_prompt_content  # Pass the prompt here
