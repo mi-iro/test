@@ -195,7 +195,7 @@ class RAGAgent:
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                # reasoning_effort="high",
+                reasoning_effort="high",
                 messages=messages,
                 temperature=1.0
             )
@@ -256,14 +256,14 @@ class RAGAgent:
             for i, el in enumerate(page_elements):
                 if el.type == "page_image":
                     if self.use_ocr_both:
-                        # 1. Model OCR Content
-                        if el.content:
-                            content_list.append({"type": "text", "text": f"Model OCR Content: {el.content}\n"})
                         # 2. Raw OCR Content
                         if bbox_extractor:
                             raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
                             if raw_content:
                                 content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                        # 1. Model OCR Content
+                        if el.content:
+                            content_list.append({"type": "text", "text": f"Model Comments: {el.content}\n"})
                     elif self.use_ocr:
                         text_content = ""
                         if self.use_ocr_raw and bbox_extractor:
@@ -287,14 +287,14 @@ class RAGAgent:
                             content_list.append({"type": "image_url", "image_url": {"url": img_url}})
                 
                 if self.use_ocr_both:
-                    # 1. Model OCR Content
-                    if el.content:
-                        content_list.append({"type": "text", "text": f"Model OCR Content: {el.content}\n"})
                     # 2. Raw OCR Content
                     if bbox_extractor:
                         raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
                         if raw_content:
                             content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                    # 1. Model OCR Content
+                    if el.content:
+                        content_list.append({"type": "text", "text": f"Model Comments: {el.content}\n"})
                 elif self.use_ocr:
                     text_content = ""
                     if self.use_ocr_raw and bbox_extractor:
