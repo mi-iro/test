@@ -195,7 +195,7 @@ class RAGAgent:
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                reasoning_effort="high",
+                # reasoning_effort="high",
                 messages=messages,
                 temperature=1.0
             )
