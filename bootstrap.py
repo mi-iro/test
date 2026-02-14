@@ -69,6 +69,7 @@ def get_common_parser():
 
     # Generation Context Params
     parser.add_argument("--use_page", action="store_true")
+    parser.add_argument("--use_page_ocr", action="store_true", help="Include full page OCR text in context.")
     parser.add_argument("--use_crop", action="store_true")
     parser.add_argument("--use_ocr", action="store_true")
     parser.add_argument("--use_ocr_raw", action="store_true")
@@ -246,6 +247,7 @@ def initialize_components(args, init_retriever=True, init_generator=True):
         top_k=args.top_k,
         cache_dir=os.path.join(args.output_dir, "cache_agent"),
         use_page=args.use_page,
+        use_page_ocr=args.use_page_ocr, # Passed new argument
         use_crop=args.use_crop,
         use_ocr=args.use_ocr,
         use_ocr_raw=args.use_ocr_raw,

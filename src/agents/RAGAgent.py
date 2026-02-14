@@ -123,6 +123,7 @@ class RAGAgent:
         top_k: int = 5,
         cache_dir: str = "./cache_results_rag",
         use_page: bool = False,
+        use_page_ocr: bool = False,
         use_crop: bool = True,
         use_ocr: bool = True,
         use_ocr_raw: bool = False,
@@ -140,6 +141,7 @@ class RAGAgent:
         self.cache_dir = cache_dir
         
         self.use_page = use_page
+        self.use_page_ocr = use_page_ocr
         self.use_crop = use_crop
         self.use_ocr = use_ocr
         self.use_ocr_raw = use_ocr_raw
@@ -238,8 +240,8 @@ class RAGAgent:
         # 对页面路径进行排序
         page_order = sorted(pages_map.keys(), key=get_page_number)
         
-        # 如果启用了 raw OCR 或 both OCR，初始化提取器
-        bbox_extractor = MinerUBboxExtractor() if (self.use_ocr_raw or self.use_ocr_both) else None
+        # 如果启用了 raw OCR 或 both OCR 或 page OCR，初始化提取器
+        bbox_extractor = MinerUBboxExtractor() if (self.use_ocr_raw or self.use_ocr_both or self.use_page_ocr) else None
         
         for p_idx, page_path in enumerate(page_order):
             page_elements = pages_map[page_path]
@@ -250,8 +252,17 @@ class RAGAgent:
                 if page_path and os.path.exists(page_path):
                     img_url = local_image_to_data_url(page_path, max_pixels=self.max_page_pixels)
                     if img_url:
-                        content_list.append({"type": "text", "text": "Full Page Context:\n"})
+                        content_list.append({"type": "text", "text": "**Full Page Image**:\n"})
                         content_list.append({"type": "image_url", "image_url": {"url": img_url}})
+            
+            # --- Added use_page_ocr logic ---
+            if self.use_page_ocr and bbox_extractor:
+                if page_path and os.path.exists(page_path):
+                     # [0,0,1000,1000] covers the full page in relative coordinates
+                     full_ocr = bbox_extractor.extract_content_str(page_path, [0, 0, 1000, 1000], padding_ratio=0)
+                     if full_ocr:
+                         content_list.append({"type": "text", "text": f"**Full Page OCR Content**:\n{full_ocr}\n"})
+            # --------------------------------
 
             for i, el in enumerate(page_elements):
                 if el.type == "page_image":
@@ -260,10 +271,10 @@ class RAGAgent:
                         if bbox_extractor:
                             raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
                             if raw_content:
-                                content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                                content_list.append({"type": "text", "text": f"**Raw OCR Content**: {raw_content}\n"})
                         # 1. Model OCR Content
                         if el.content:
-                            content_list.append({"type": "text", "text": f"Model Comments: {el.content}\n"})
+                            content_list.append({"type": "text", "text": f"**Model Comments**: {el.content}\n"})
                     elif self.use_ocr:
                         text_content = ""
                         if self.use_ocr_raw and bbox_extractor:
@@ -273,7 +284,7 @@ class RAGAgent:
                             text_content = el.content
                         
                         if text_content:
-                            content_list.append({"type": "text", "text": f"Text Content: {text_content}\n"})
+                            content_list.append({"type": "text", "text": f"**Text Content**: {text_content}\n"})
                     continue
                 
                 content_list.append({"type": "text", "text": f"\n-- Key Region {i+1} on this Page --\n"})
@@ -283,7 +294,7 @@ class RAGAgent:
                     if img_path and os.path.exists(img_path):
                         img_url = local_image_to_data_url(img_path)
                         if img_url:
-                            content_list.append({"type": "text", "text": "Region Detail:\n"})
+                            content_list.append({"type": "text", "text": "**Region Detail**:\n"})
                             content_list.append({"type": "image_url", "image_url": {"url": img_url}})
                 
                 if self.use_ocr_both:
@@ -291,10 +302,10 @@ class RAGAgent:
                     if bbox_extractor:
                         raw_content = bbox_extractor.extract_content_str(el.corpus_path, el.bbox)
                         if raw_content:
-                            content_list.append({"type": "text", "text": f"Raw OCR Content: {raw_content}\n"})
+                            content_list.append({"type": "text", "text": f"**Raw OCR Content**: {raw_content}\n"})
                     # 1. Model OCR Content
                     if el.content:
-                        content_list.append({"type": "text", "text": f"Model Comments: {el.content}\n"})
+                        content_list.append({"type": "text", "text": f"**Model Comments**: {el.content}\n"})
                 elif self.use_ocr:
                     text_content = ""
                     if self.use_ocr_raw and bbox_extractor:
@@ -304,7 +315,7 @@ class RAGAgent:
                         text_content = el.content
                     
                     if text_content:
-                        content_list.append({"type": "text", "text": f"Text Content: {text_content}\n"})
+                        content_list.append({"type": "text", "text": f"**Text Content**: {text_content}\n"})
         
         content_list.append({"type": "text", "text": "\n---------------------\n"})
         return content_list
