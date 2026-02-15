@@ -1,5 +1,3 @@
-# run_evaluation.py
-
 import json
 import os
 import collections
@@ -125,7 +123,10 @@ def main():
     # 2. 将结果映射回 Loader 的 samples
     results_map = {str(item['qid']): item for item in results_data}
     
+    valid_samples = []
     matched_count = 0
+    original_count = len(loader.samples)
+
     for sample in loader.samples:
         s_qid = str(sample.qid)
         if s_qid in results_map:
@@ -148,8 +149,11 @@ def main():
             # ---------------------------
 
             matched_count += 1
-            
-    print(f"✅ Mapped results for {matched_count}/{len(loader.samples)} samples.")
+            valid_samples.append(sample)
+    
+    # --- Strict Filtering: Discard samples not found in input file ---
+    loader.samples = valid_samples
+    print(f"✅ Mapped results for {matched_count}/{original_count} samples. (Discarded {original_count - matched_count} unmatched samples)")
     
     final_metrics = {}
 
@@ -166,7 +170,7 @@ def main():
 
     # Task: Generation
     if args.evaluation_task in ["generation", "all"]:
-        has_answers = any("final_answer" in s.extra_info for s in loader.samples if str(s.qid) in results_map)
+        has_answers = any("final_answer" in s.extra_info for s in loader.samples)
         if has_answers:
             try:
                 print("\n--- Generation Metrics ---")

@@ -193,6 +193,7 @@ MMLONG_EXTRACT_PROMPT_TEMPLATE = """Given the question and analysis, you are tas
 
 
 
+
 ```
 
 Extracted answer: [answer]
@@ -299,9 +300,14 @@ class MMLongLoader(BaseDataLoader):
         """
         执行页面检索评估。
         新增指标：平均召回的页面数量 (avg_retrieved_page_count)
+        按 Evidence Source 分组统计 (Recall, Precision, Count)
         """
         total_metrics = collections.defaultdict(float)
         counts = collections.defaultdict(int)
+        
+        # 分组统计字典: source -> metric_name -> value
+        source_metrics = collections.defaultdict(lambda: collections.defaultdict(float))
+        source_counts = collections.defaultdict(int)
 
         print(f"Starting Retrieval Evaluation on {len(self.samples)} samples...")
 
@@ -311,13 +317,25 @@ class MMLongLoader(BaseDataLoader):
             
             metrics_result = sample.extra_info.get('metrics', {})
             
+            # --- Identify Evidence Sources ---
+            ev_sources_str = sample.extra_info.get('evidence_sources', "[]")
+            try:
+                ev_sources = ast.literal_eval(str(ev_sources_str))
+                if not isinstance(ev_sources, list):
+                    ev_sources = [str(ev_sources)]
+            except:
+                ev_sources = ["Unknown"]
+            
+            # Add "Not Answerable" if sources are empty
+            if not ev_sources:
+                ev_sources = ["Not Answerable"]
+
             # --- Page Retrieval Evaluation ---
             raw_elements = sample.extra_info.get('retrieved_elements', [])
             pred_elements = []
             
-            # --- 新增：统计当前样本召回的唯一页面数量 ---
+            # 统计当前样本召回的唯一页面数量
             unique_retrieved_pages = set()
-            # ----------------------------------------
 
             for el in raw_elements:
                 if isinstance(el, dict):
@@ -325,26 +343,45 @@ class MMLongLoader(BaseDataLoader):
                     filtered_el = {k: v for k, v in el.items() if k in valid_keys}
                     pe = PageElement(**filtered_el)
                     pred_elements.append(pe)
-                    # 记录 Page ID
                     if pe.corpus_id: unique_retrieved_pages.add(pe.corpus_id)
                 elif isinstance(el, PageElement):
                     pred_elements.append(el)
-                    # 记录 Page ID
                     if el.corpus_id: unique_retrieved_pages.add(el.corpus_id)
 
-            # --- 新增：累加页面数量 ---
-            total_metrics['retrieved_page_count'] += len(unique_retrieved_pages)
-            # ------------------------
+            retrieved_count = len(unique_retrieved_pages)
+            total_metrics['retrieved_page_count'] += retrieved_count
 
-            if sample.gold_pages:
+            # 计算 Metrics
+            # 判断是否需要计算 Recall/Precision：如果 Gold Pages 存在，或者明确是 Unanswerable（Gold Pages 为空）
+            is_unanswerable = ("Not Answerable" in ev_sources)
+            
+            current_recall = 0.0
+            current_precision = 0.0
+            
+            if sample.gold_pages or is_unanswerable:
                 page_score = {'recall': 0.0, 'precision': 0.0}
                 if hasattr(self, '_compute_page_metrics'):
+                     # _compute_page_metrics 能够处理空 gold_pages (期望 pred 也为空则 P=1, R=1)
                      page_score = self._compute_page_metrics(pred_elements, sample.gold_pages)
                 
+                current_recall = page_score['recall']
+                current_precision = page_score['precision']
+                
                 metrics_result['page'] = page_score
-                total_metrics['page_recall'] += page_score['recall']
-                total_metrics['page_precision'] += page_score['precision']
+                total_metrics['page_recall'] += current_recall
+                total_metrics['page_precision'] += current_precision
                 counts['page'] += 1
+            
+            # --- Update Source-based Metrics ---
+            for src in ev_sources:
+                source_counts[src] += 1
+                source_metrics[src]['retrieved_page_count'] += retrieved_count
+                
+                # 只有计算了有效 Metrics 的才计入分组 Recall/Precision 平均
+                if sample.gold_pages or is_unanswerable:
+                    source_metrics[src]['page_recall'] += current_recall
+                    source_metrics[src]['page_precision'] += current_precision
+                    source_metrics[src]['count_with_gold'] += 1
 
             sample.extra_info['metrics'] = metrics_result
 
@@ -353,10 +390,20 @@ class MMLongLoader(BaseDataLoader):
             avg_results['avg_page_recall'] = total_metrics['page_recall'] / counts['page']
             avg_results['avg_page_precision'] = total_metrics['page_precision'] / counts['page']
         
-        # --- 新增：计算平均召回页面数量 ---
         if len(self.samples) > 0:
             avg_results['avg_retrieved_page_count'] = total_metrics['retrieved_page_count'] / len(self.samples)
-        # -------------------------------
+            
+        # --- Source-based Averages ---
+        for src, metrics in source_metrics.items():
+            count_all = source_counts[src]
+            count_gold = metrics.get('count_with_gold', 0)
+            
+            if count_all > 0:
+                avg_results[f'avg_retrieved_page_count_{src}'] = metrics['retrieved_page_count'] / count_all
+            
+            if count_gold > 0:
+                avg_results[f'avg_page_recall_{src}'] = metrics['page_recall'] / count_gold
+                avg_results[f'avg_page_precision_{src}'] = metrics['page_precision'] / count_gold
         
         return avg_results
 
@@ -364,7 +411,7 @@ class MMLongLoader(BaseDataLoader):
         """
         执行生成结果评估 (QA Evaluation)，支持多线程。
         新增指标：
-        1. 按照 evidence_sources 分类统计 model_eval
+        1. 按照 evidence_sources 分类统计 model_eval (含 Not Answerable)
         2. 统计平均 input prompt token 和 output prompt token
         """
         total_metrics = collections.defaultdict(float)
@@ -432,6 +479,9 @@ class MMLongLoader(BaseDataLoader):
                             except:
                                 ev_sources = ["Unknown"]
                             
+                            # Add Not Answerable if empty
+                            if not ev_sources: ev_sources = ["Not Answerable"]
+
                             for src in ev_sources:
                                 total_metrics[f'model_eval_{src}'] += score
                                 counts[f'count_{src}'] += 1
@@ -460,6 +510,9 @@ class MMLongLoader(BaseDataLoader):
                         if not isinstance(ev_sources, list): ev_sources = [str(ev_sources)]
                     except:
                         ev_sources = ["Unknown"]
+                    
+                    # Add Not Answerable if empty
+                    if not ev_sources: ev_sources = ["Not Answerable"]
                     
                     for src in ev_sources:
                         total_metrics[f'model_eval_{src}'] += score

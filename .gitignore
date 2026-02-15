@@ -12,3 +12,5 @@ retrieved_labeled_results*
 batch_run.sh
 configs/*
 outputs/
+eval.sh
+run.sh
