@@ -178,7 +178,8 @@ class RAGAgent:
             context_content = self.build_context_message(retrieved_elements)
             user_content.extend(context_content)
         else:
-            user_content.append({"type": "text", "text": "No relevant context found.\n"})
+            user_content.append({"type": "text", "text": "Here is the retrieved context/evidence from the documents, grouped by page:\n"})
+            user_content.append({"type": "text", "text": "!!!No relevant context found!!!.\n"})
 
         user_content.append({"type": "text", "text": f"Question: {query}"})
         messages.append({"role": "user", "content": user_content})
