@@ -202,7 +202,7 @@ class RAGAgent:
                 model=self.model_name,
                 # reasoning_effort="high",
                 messages=messages,
-                temperature=0.7
+                temperature=1.0
             )
             final_answer = response.choices[0].message.content
             
