@@ -45,10 +45,18 @@ def process_single_sample_generation(item, agent, cache_dir):
         # 更新结果
         item['model_answer'] = gen_output['final_answer']
         item['messages'] = gen_output['messages']
+        
+        # --- 新增：保存 Token 统计 ---
+        item['prompt_tokens'] = gen_output.get('prompt_tokens', 0)
+        item['completion_tokens'] = gen_output.get('completion_tokens', 0)
+        # ---------------------------
+        
     except Exception as e:
         print(f"Error generating for {qid}: {e}")
         item['model_answer'] = "Error during generation."
         item['messages'] = []
+        item['prompt_tokens'] = 0
+        item['completion_tokens'] = 0
 
     # 3. Save Cache
     try:

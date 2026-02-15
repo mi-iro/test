@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Callable, Union
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import ast # 确保导入 ast 用于解析 evidence_sources
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -297,6 +298,7 @@ class MMLongLoader(BaseDataLoader):
     def evaluate_retrieval(self) -> Dict[str, float]:
         """
         执行页面检索评估。
+        新增指标：平均召回的页面数量 (avg_retrieved_page_count)
         """
         total_metrics = collections.defaultdict(float)
         counts = collections.defaultdict(int)
@@ -307,19 +309,32 @@ class MMLongLoader(BaseDataLoader):
             if sample.extra_info is None:
                 sample.extra_info = {}
             
-            # 获取当前 metrics，避免覆盖其他 metrics
             metrics_result = sample.extra_info.get('metrics', {})
             
             # --- Page Retrieval Evaluation ---
             raw_elements = sample.extra_info.get('retrieved_elements', [])
             pred_elements = []
+            
+            # --- 新增：统计当前样本召回的唯一页面数量 ---
+            unique_retrieved_pages = set()
+            # ----------------------------------------
+
             for el in raw_elements:
                 if isinstance(el, dict):
                     valid_keys = PageElement.__annotations__.keys()
                     filtered_el = {k: v for k, v in el.items() if k in valid_keys}
-                    pred_elements.append(PageElement(**filtered_el))
+                    pe = PageElement(**filtered_el)
+                    pred_elements.append(pe)
+                    # 记录 Page ID
+                    if pe.corpus_id: unique_retrieved_pages.add(pe.corpus_id)
                 elif isinstance(el, PageElement):
                     pred_elements.append(el)
+                    # 记录 Page ID
+                    if el.corpus_id: unique_retrieved_pages.add(el.corpus_id)
+
+            # --- 新增：累加页面数量 ---
+            total_metrics['retrieved_page_count'] += len(unique_retrieved_pages)
+            # ------------------------
 
             if sample.gold_pages:
                 page_score = {'recall': 0.0, 'precision': 0.0}
@@ -338,11 +353,19 @@ class MMLongLoader(BaseDataLoader):
             avg_results['avg_page_recall'] = total_metrics['page_recall'] / counts['page']
             avg_results['avg_page_precision'] = total_metrics['page_precision'] / counts['page']
         
+        # --- 新增：计算平均召回页面数量 ---
+        if len(self.samples) > 0:
+            avg_results['avg_retrieved_page_count'] = total_metrics['retrieved_page_count'] / len(self.samples)
+        # -------------------------------
+        
         return avg_results
 
     def evaluate_generation(self, num_threads: int = 8) -> Dict[str, float]:
         """
         执行生成结果评估 (QA Evaluation)，支持多线程。
+        新增指标：
+        1. 按照 evidence_sources 分类统计 model_eval
+        2. 统计平均 input prompt token 和 output prompt token
         """
         total_metrics = collections.defaultdict(float)
         counts = collections.defaultdict(int)
@@ -372,7 +395,6 @@ class MMLongLoader(BaseDataLoader):
                 has_valid_gold = True
                 final_pred_to_score = raw_pred_answer
                 
-                # 如果有 LLM Caller，先进行答案提取
                 if self.llm_caller and raw_pred_answer:
                     extract_res = self._extract_answer_with_llm(sample.query, raw_pred_answer, self.llm_caller)
                     final_pred_to_score = extract_res['extracted_answer']
@@ -390,31 +412,82 @@ class MMLongLoader(BaseDataLoader):
             
             return score, 1 if has_valid_gold else 0
 
-        # 多线程执行
+        # 多线程执行 (保持不变)
         if num_threads > 1:
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                # 提交任务
                 future_to_sample = {executor.submit(process_single_sample, sample): sample for sample in self.samples}
-                
                 for future in tqdm(as_completed(future_to_sample), total=len(self.samples), desc="Evaluating Generation"):
                     try:
                         score, count = future.result()
+                        sample = future_to_sample[future] # 获取对应的 sample 对象
                         if count > 0:
                             total_metrics['model_eval'] += score
                             counts['total'] += count
+                            
+                            # --- 新增 1: Evidence Source 分类统计 ---
+                            ev_sources_str = sample.extra_info.get('evidence_sources', "[]")
+                            try:
+                                ev_sources = ast.literal_eval(str(ev_sources_str))
+                                if not isinstance(ev_sources, list): ev_sources = [str(ev_sources)]
+                            except:
+                                ev_sources = ["Unknown"]
+                            
+                            for src in ev_sources:
+                                total_metrics[f'model_eval_{src}'] += score
+                                counts[f'count_{src}'] += 1
+                            # --------------------------------------
+
+                        # --- 新增 2: Token 统计 (无论是否有 gold answer 都统计) ---
+                        total_metrics['prompt_tokens'] += sample.extra_info.get('prompt_tokens', 0)
+                        total_metrics['completion_tokens'] += sample.extra_info.get('completion_tokens', 0)
+                        counts['token_count_samples'] += 1
+                        # ----------------------------------------------------
+
                     except Exception as e:
                         print(f"Error processing sample in thread: {e}")
         else:
-            # 单线程回退
+            # 单线程回退 (添加相同的统计逻辑)
             for sample in tqdm(self.samples, desc="Evaluating Generation"):
                 score, count = process_single_sample(sample)
                 if count > 0:
                     total_metrics['model_eval'] += score
                     counts['total'] += count
+                    
+                    # --- 新增 1: Evidence Source 分类统计 ---
+                    ev_sources_str = sample.extra_info.get('evidence_sources', "[]")
+                    try:
+                        ev_sources = ast.literal_eval(str(ev_sources_str))
+                        if not isinstance(ev_sources, list): ev_sources = [str(ev_sources)]
+                    except:
+                        ev_sources = ["Unknown"]
+                    
+                    for src in ev_sources:
+                        total_metrics[f'model_eval_{src}'] += score
+                        counts[f'count_{src}'] += 1
+                
+                # --- 新增 2: Token 统计 ---
+                total_metrics['prompt_tokens'] += sample.extra_info.get('prompt_tokens', 0)
+                total_metrics['completion_tokens'] += sample.extra_info.get('completion_tokens', 0)
+                counts['token_count_samples'] += 1
 
         avg_results = {}
         if counts['total'] > 0:
             avg_results['avg_model_eval'] = total_metrics['model_eval'] / counts['total']
+        
+        # --- 新增：计算分类指标平均值 ---
+        for key in total_metrics:
+            if key.startswith('model_eval_'):
+                src = key.replace('model_eval_', '')
+                cnt = counts[f'count_{src}']
+                if cnt > 0:
+                    avg_results[f'avg_model_eval_{src}'] = total_metrics[key] / cnt
+        # -----------------------------
+
+        # --- 新增：计算 Token 平均值 ---
+        if counts['token_count_samples'] > 0:
+            avg_results['avg_input_tokens'] = total_metrics['prompt_tokens'] / counts['token_count_samples']
+            avg_results['avg_output_tokens'] = total_metrics['completion_tokens'] / counts['token_count_samples']
+        # -----------------------------
             
         return avg_results
 

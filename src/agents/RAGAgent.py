@@ -178,7 +178,7 @@ class RAGAgent:
     def generate(self, query: str, retrieved_elements: List[PageElement]) -> Dict[str, Any]:
         """
         独立生成步骤：根据 Query 和检索到的 Elements 生成回答。
-        返回包含 'final_answer' 和 'messages' 的字典。
+        返回包含 'final_answer', 'messages', 'prompt_tokens', 'completion_tokens' 的字典。
         """
         # 使用 self.system_prompt
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -194,6 +194,9 @@ class RAGAgent:
         messages.append({"role": "user", "content": user_content})
 
         final_answer = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -202,14 +205,22 @@ class RAGAgent:
                 temperature=0.7
             )
             final_answer = response.choices[0].message.content
-            #print(final_answer)
+            
+            # --- 新增：捕获 Token 使用情况 ---
+            if hasattr(response, 'usage') and response.usage:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
+            # -------------------------------
+            
         except Exception as e:
             print(f"LLM API Error: {e}")
             final_answer = "Error during generation."
 
         return {
             "final_answer": final_answer,
-            "messages": messages[1:] # 不返回 system prompt
+            "messages": messages[1:], # 不返回 system prompt
+            "prompt_tokens": prompt_tokens, # 新增
+            "completion_tokens": completion_tokens # 新增
         }
 
     def build_context_message(self, elements: List[PageElement]) -> List[Dict[str, Any]]:

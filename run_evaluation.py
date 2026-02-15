@@ -142,6 +142,11 @@ def main():
             elif 'final_answer' in res: 
                 sample.extra_info['final_answer'] = res['final_answer']
 
+            # --- 新增：映射 Token 统计 ---
+            sample.extra_info['prompt_tokens'] = res.get('prompt_tokens', 0)
+            sample.extra_info['completion_tokens'] = res.get('completion_tokens', 0)
+            # ---------------------------
+
             matched_count += 1
             
     print(f"✅ Mapped results for {matched_count}/{len(loader.samples)} samples.")
@@ -149,7 +154,6 @@ def main():
     final_metrics = {}
 
     # 3. 执行评估
-    
     # Task: Retrieval
     if args.evaluation_task in ["retrieval", "all"]:
         try:
