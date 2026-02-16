@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional, Callable, Union
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-import ast # 确保导入 ast 用于解析 evidence_sources
+import ast 
 
 # Adjust path to ensure we can import from src and scripts
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
@@ -24,7 +24,6 @@ from scripts.qwen3_vl_reranker_client import Qwen3VLReranker
 from src.utils.llm_helper import create_llm_caller
 
 # --- Scoring Functions ported from mmlongbench_eval_score.py ---
-
 def levenshtein_distance(s1, s2):
     if len(s1) > len(s2):
         s1, s2 = s2, s1
@@ -288,6 +287,132 @@ class MMLongLoader(BaseDataLoader):
         except Exception as e:
             print(f"Error during LLM extraction: {e}")
             return {"extracted_answer": raw_response, "answer_format": "String"}
+
+    def _serialize_element(self, elem):
+        """Helper to convert PageElement or dict to JSON-serializable dict"""
+        if isinstance(elem, dict):
+            return elem
+        if hasattr(elem, '__dict__'):
+            return elem.__dict__
+        return str(elem)
+
+    def _sanitize_filename(self, name):
+        """Sanitize the source name to be safe for filenames."""
+        return "".join([c if c.isalnum() else "_" for c in str(name)])
+
+    def save_bad_cases(self, output_dir: str, task: str):
+        """
+        Filter and save bad cases based on evaluation metrics.
+        Saves separate JSON files for each Evidence Source.
+        """
+        bad_case_dir = os.path.join(output_dir, "bad_cases")
+        os.makedirs(bad_case_dir, exist_ok=True)
+
+        # Global lists for all cases
+        retrieval_bad_cases = []
+        generation_bad_cases = []
+
+        # Dictionary to hold lists separated by source
+        retrieval_by_source = collections.defaultdict(list)
+        generation_by_source = collections.defaultdict(list)
+
+        print(f"🔍 Analyzing {len(self.samples)} samples for bad cases...")
+
+        for sample in self.samples:
+            if sample.extra_info is None:
+                continue
+            
+            # --- Parse Evidence Sources (Logic from MMLongLoader.py) ---
+            ev_sources_str = sample.extra_info.get('evidence_sources', "[]")
+            try:
+                ev_sources = ast.literal_eval(str(ev_sources_str))
+                if not isinstance(ev_sources, list):
+                    ev_sources = [str(ev_sources)]
+            except:
+                ev_sources = ["Unknown"]
+            
+            # Add "Not Answerable" if sources are empty
+            if not ev_sources:
+                ev_sources = ["Not Answerable"]
+            # --------------------------------------------------------
+
+            metrics = sample.extra_info.get('metrics', {})
+            
+            # Flatten metrics
+            flat_metrics = metrics.copy()
+            if 'page' in metrics and isinstance(metrics['page'], dict):
+                flat_metrics['page_recall'] = metrics['page'].get('recall', 0.0)
+                flat_metrics['page_precision'] = metrics['page'].get('precision', 0.0)
+            
+            # 1. Retrieval Bad Case Check
+            is_retrieval_bad = False
+            if 'page_recall' in flat_metrics and flat_metrics['page_recall'] < 1.0:
+                is_retrieval_bad = True
+            elif 'page' in metrics and metrics['page'].get('recall', 1.0) < 1.0:
+                is_retrieval_bad = True
+                flat_metrics['page_recall'] = metrics['page'].get('recall')
+                flat_metrics['page_precision'] = metrics['page'].get('precision')
+
+            # 2. Generation Bad Case Check
+            is_generation_bad = False
+            if 'model_eval' in metrics and metrics['model_eval'] < 1.0:
+                is_generation_bad = True
+
+            # Construct Serializable Sample Object
+            sample_dict = {
+                "qid": str(sample.qid),
+                "query": sample.query,
+                "gold_answer": sample.gold_answer,
+                "gold_pages": sample.gold_pages,
+                "evidence_sources": ev_sources,
+                "final_answer": sample.extra_info.get("final_answer", ""),
+                "metrics": flat_metrics,
+                "retrieved_elements": [self._serialize_element(e) for e in sample.extra_info.get("retrieved_elements", [])],
+                "doc_source": sample.data_source
+            }
+
+            # Add to collections
+            if is_retrieval_bad:
+                retrieval_bad_cases.append(sample_dict)
+                for src in ev_sources:
+                    retrieval_by_source[src].append(sample_dict)
+            
+            if is_generation_bad:
+                generation_bad_cases.append(sample_dict)
+                for src in ev_sources:
+                    generation_by_source[src].append(sample_dict)
+
+        # --- Save Retrieval Bad Cases ---
+        if task in ["retrieval", "all"] and retrieval_bad_cases:
+            # 1. Save All
+            p_all = os.path.join(bad_case_dir, "retrieval_bad_cases_all.json")
+            with open(p_all, "w", encoding="utf-8") as f:
+                json.dump(retrieval_bad_cases, f, indent=2, ensure_ascii=False)
+            print(f"📉 Saved {len(retrieval_bad_cases)} total retrieval bad cases to {p_all}")
+
+            # 2. Save per Source
+            for source, cases in retrieval_by_source.items():
+                safe_name = self._sanitize_filename(source)
+                p_src = os.path.join(bad_case_dir, f"retrieval_bad_cases_{safe_name}.json")
+                with open(p_src, "w", encoding="utf-8") as f:
+                    json.dump(cases, f, indent=2, ensure_ascii=False)
+                print(f"   └─ Saved {len(cases)} cases for source '{source}' to {os.path.basename(p_src)}")
+
+        # --- Save Generation Bad Cases ---
+        if task in ["generation", "all"] and generation_bad_cases:
+            # 1. Save All
+            p_all = os.path.join(bad_case_dir, "generation_bad_cases_all.json")
+            with open(p_all, "w", encoding="utf-8") as f:
+                json.dump(generation_bad_cases, f, indent=2, ensure_ascii=False)
+            print(f"📉 Saved {len(generation_bad_cases)} total generation bad cases to {p_all}")
+
+            # 2. Save per Source
+            for source, cases in generation_by_source.items():
+                safe_name = self._sanitize_filename(source)
+                p_src = os.path.join(bad_case_dir, f"generation_bad_cases_{safe_name}.json")
+                with open(p_src, "w", encoding="utf-8") as f:
+                    json.dump(cases, f, indent=2, ensure_ascii=False)
+                print(f"   └─ Saved {len(cases)} cases for source '{source}' to {os.path.basename(p_src)}")
 
     def evaluate_retrieval(self) -> Dict[str, float]:
         """
