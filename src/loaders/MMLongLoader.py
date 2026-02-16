@@ -189,16 +189,9 @@ def eval_score(gt, pred, answer_type):
 MMLONG_EXTRACT_PROMPT_TEMPLATE = """Given the question and analysis, you are tasked to extract answers with required formats from the free-form analysis. 
 - Your extracted answers should be one of the following formats: (1) Integer, (2) Float, (3) String and (4) List. If you find the analysis the question can not be answered from the given documents, type "Not answerable". Exception: If the analysis only tells you that it can not read/understand the images or documents, type "Fail to answer".
 - Please make your response as concise as possible. Also note that your response should be formatted as below:
-
-
-
-
-
 ```
-
 Extracted answer: [answer]
 Answer format: [answer format]
-
 ```
 
 Please read the following example, then extract the answer from the model response and type it at the end of the prompt. 
@@ -445,9 +438,6 @@ class MMLongLoader(BaseDataLoader):
                 if self.llm_caller and raw_pred_answer:
                     extract_res = self._extract_answer_with_llm(sample.query, raw_pred_answer, self.llm_caller)
                     final_pred_to_score = extract_res['extracted_answer']
-                    if extract_res['answer_format']:
-                        gold_format = extract_res['answer_format']
-                    
                     sample.extra_info['extracted_answer'] = final_pred_to_score
                 
                 score = eval_score(gold_answer, final_pred_to_score, gold_format)
